@@ -1,0 +1,74 @@
+nextcloud:
+  nextcloud:
+    host: nextcloud-flourishing.duckdns.org
+    username: admin
+    password: "changeme"
+    extraEnv:
+      - name: PGSSLMODE
+        value: "require"
+      - name: HOME
+        value: "/tmp"
+    phpConfigs:
+      zz-upload-limit.ini: |-
+        upload_max_filesize=100M
+        post_max_size=105M
+        max_execution_time=120
+
+  ingress:
+    enabled: false
+    # className: "traefik"
+    # path: /
+    # pathType: Prefix
+    # annotations:
+    #   traefik.ingress.kubernetes.io/router.tls: "true"
+    #   traefik.ingress.kubernetes.io/router.tls.certresolver: "letsencrypt"
+
+  internalDatabase:
+    enabled: false
+
+
+  ##
+  ## External database configuration
+  ##
+  externalDatabase:
+    enabled: true
+
+    ## Supported database engines: mysql or postgresql
+    type: postgresql
+
+    ## Database host. You can optionally include a colon delimited port like "myhost:1234"
+    host: "education.c1mwayiw4hmn.ca-central-1.rds.amazonaws.com"
+
+    ## Database user
+    user: ""
+
+    ## Database password
+    password: ""
+
+    ## Database name
+    database: nextcloud
+
+    ## Use a existing secret
+    existingSecret:
+      enabled: true
+      # -- e.g. nameofsecret
+      secretName: db-secrets
+      usernameKey: DB_USERNAME
+      passwordKey: DB_PASSWORD
+      # -- e.g. db-hostname-or-ip
+      hostKey:
+      # -- e.g. db-name
+      databaseKey:
+
+  persistence:
+    enabled: true
+    storageClass: "local-path"
+    size: 20Gi
+
+sealed-secrets:
+  fullnameOverride: sealed-secrets-controller
+  crd:
+    # crd.create: `true` if the crd resources should be created
+    create: true
+    # crd.keep: `true` if the sealed secret CRD should be kept when the chart is deleted
+    keep: true

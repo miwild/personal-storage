@@ -1,0 +1,16 @@
+apiVersion: v2
+name: nextcloud-umbrella
+description: A version-controlled wrapper chart for Nextcloud
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+
+dependencies:
+  - name: nextcloud
+    version: 9.2.6  
+    # This must be the metadata URL, NOT the web repo address
+    repository: "https://nextcloud.github.io/helm"
+
+  - name: sealed-secrets
+    version: 2.19.3
+    repository: "https://bitnami.github.io/sealed-secrets"

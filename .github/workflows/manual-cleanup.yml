@@ -1,0 +1,117 @@
+
+name: Terraform cleanup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nextcloud-demo-provisioning
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ca-central-1
+      TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+      TF_VAR_duckdns_token: ${{ secrets.DUCKDNS_TOKEN }}
+
+    steps:
+      - name: Mark cleanup as running
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          DEMO_STATUS_KV_NAMESPACE_ID: ${{ vars.DEMO_STATUS_KV_NAMESPACE_ID }}
+        run: |
+          set -euo pipefail
+
+          RESPONSE=$(curl --silent --show-error --fail-with-body \
+            --request PUT \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            --header "Content-Type: application/octet-stream" \
+            --data-binary "running" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces/${DEMO_STATUS_KV_NAMESPACE_ID}/values/cleanupStatus?expiration_ttl=14400")
+
+          echo "$RESPONSE" | jq -e '.success == true' >/dev/null
+
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Set VPN PKI path
+        run: echo "TF_VAR_vpn_pki_path=$RUNNER_TEMP/vpn-pki" >> "$GITHUB_ENV"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ca-central-1
+
+      - name: Prepare credentials and certificates
+        env:
+          VPN_SERVER_KEY: ${{ secrets.VPN_SERVER_KEY }}
+          VPN_SERVER_CERT: ${{ secrets.VPN_SERVER_CERT }}
+          VPN_CLIENT_KEY: ${{ secrets.VPN_CLIENT_KEY }}
+          VPN_CLIENT_CERT: ${{ secrets.VPN_CLIENT_CERT }}
+          VPN_CA_KEY: ${{ secrets.VPN_CA_KEY }}
+          VPN_CA_CERT: ${{ secrets.VPN_CA_CERT }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$TF_VAR_vpn_pki_path"/{private,issued}
+          printf '%s' "$VPN_SERVER_KEY" > "$TF_VAR_vpn_pki_path/private/server.key"
+          printf '%s' "$VPN_SERVER_CERT" > "$TF_VAR_vpn_pki_path/issued/server.crt"
+          printf '%s' "$VPN_CLIENT_KEY" > "$TF_VAR_vpn_pki_path/private/client1.domain.tld.key"
+          printf '%s' "$VPN_CLIENT_CERT" > "$TF_VAR_vpn_pki_path/issued/client1.domain.tld.crt"
+          printf '%s' "$VPN_CA_KEY" > "$TF_VAR_vpn_pki_path/private/ca.key"
+          printf '%s' "$VPN_CA_CERT" > "$TF_VAR_vpn_pki_path/ca.crt"
+
+      - name: Destroy RDS
+        run: |
+          set -euo pipefail
+          cd infra/AWS/RDS
+          terraform init -input=false
+          terraform destroy -auto-approve -input=false
+
+      - name: Remove VPN subnet association
+        run: |
+          set -euo pipefail
+          cd infra/AWS
+          terraform init -input=false
+          terraform destroy \
+            -target=aws_ec2_client_vpn_network_association.education \
+            -auto-approve \
+            -input=false
+
+      - name: Destroy EC2 and Elastic IP
+        run: |
+          set -euo pipefail
+          cd infra/AWS
+          terraform init -input=false
+          terraform destroy \
+            -target=aws_instance.k3s_server \
+            -target=aws_eip_association.k3s_assoc \
+            -target=aws_eip.k3s_ip \
+            -auto-approve \
+            -input=false
+
+      - name: Clear cleanup status
+        if: always()
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          DEMO_STATUS_KV_NAMESPACE_ID: ${{ vars.DEMO_STATUS_KV_NAMESPACE_ID }}
+        run: |
+          set -euo pipefail
+
+          RESPONSE=$(curl --silent --show-error --fail-with-body \
+            --request DELETE \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces/${DEMO_STATUS_KV_NAMESPACE_ID}/values/cleanupStatus")
+
+          echo "$RESPONSE" | jq -e '.success == true' >/dev/null

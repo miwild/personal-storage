@@ -1,0 +1,250 @@
+name: Deploy Nextcloud
+
+on:
+  workflow_call:
+    inputs:
+      rds_endpoint:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+
+jobs:
+  deploy-nextcloud:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+
+      - uses: azure/setup-helm@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ca-central-1
+
+      - name: Install kubeseal and OpenVPN
+        run: |
+          curl -fsSL "https://github.com/bitnami-labs/sealed-secrets/releases/download/v0.27.3/kubeseal-0.27.3-linux-amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kubeseal
+
+          sudo apt-get update
+          sudo apt-get install -y openvpn
+
+          kubectl version --client
+          helm version
+          aws --version
+          kubeseal --version
+
+      - name: Connect to Client VPN
+        env:
+          VPN_CLIENT_CERT: ${{ secrets.VPN_CLIENT_CERT }}
+          VPN_CLIENT_KEY: ${{ secrets.VPN_CLIENT_KEY }}
+        run: |
+          set -euo pipefail
+
+          ENDPOINT_ID=$(aws ec2 describe-client-vpn-endpoints \
+            --query "ClientVpnEndpoints[?Tags[?Key=='Name' && Value=='education-client-vpn']].ClientVpnEndpointId | [0]" \
+            --output text)
+
+          if [ -z "$ENDPOINT_ID" ] || [ "$ENDPOINT_ID" = "None" ]; then
+            echo "No Client VPN endpoint found. Is the stack up?"
+            exit 1
+          fi
+
+          aws ec2 export-client-vpn-client-configuration \
+            --client-vpn-endpoint-id "$ENDPOINT_ID" \
+            --output text > client.ovpn
+
+          {
+            echo "<cert>"
+            printf '%s\n' "$VPN_CLIENT_CERT"
+            echo "</cert>"
+            echo "<key>"
+            printf '%s\n' "$VPN_CLIENT_KEY"
+            echo "</key>"
+          } >> client.ovpn
+
+          chmod 600 client.ovpn
+
+          sudo openvpn --config client.ovpn --daemon --log /tmp/openvpn.log
+
+          for i in $(seq 1 120); do
+            ip addr show tun0 >/dev/null 2>&1 && break
+            sleep 5
+          done
+
+          ip addr show tun0 || {
+            cat /tmp/openvpn.log
+            exit 1
+          }
+
+      - name: Configure Kubernetes through SSM
+        run: |
+          set -euo pipefail
+
+          read -r INSTANCE_ID IP < <(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=k3s-nextcloud-host" \
+                      "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].[InstanceId,PrivateIpAddress]" \
+            --output text)
+
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+            echo "No running k3s instance found."
+            exit 1
+          fi
+
+          mkdir -p "$HOME/.kube"
+
+          for i in $(seq 1 40); do
+            COMMAND_ID=$(aws ssm send-command \
+              --instance-ids "$INSTANCE_ID" \
+              --document-name AWS-RunShellScript \
+              --parameters '{"commands":["test -s /etc/rancher/k3s/k3s.yaml && /usr/local/bin/k3s kubectl get nodes | grep -qw Ready && cat /etc/rancher/k3s/k3s.yaml"]}' \
+              --query 'Command.CommandId' \
+              --output text) || {
+                sleep 10
+                continue
+              }
+
+            if aws ssm wait command-executed \
+                 --command-id "$COMMAND_ID" \
+                 --instance-id "$INSTANCE_ID"; then
+              aws ssm get-command-invocation \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$INSTANCE_ID" \
+                --query 'StandardOutputContent' \
+                --output text > "$HOME/.kube/config"
+              break
+            fi
+
+            sleep 10
+          done
+
+          if [ ! -s "$HOME/.kube/config" ]; then
+            echo "K3s did not become ready."
+            exit 1
+          fi
+
+          chmod 600 "$HOME/.kube/config"
+          sed -i "s/127.0.0.1/$IP/" "$HOME/.kube/config"
+          kubectl get nodes
+
+      - name: Install Sealed Secrets controller
+        run: |
+          set -euo pipefail
+
+          helm repo add nextcloud https://nextcloud.github.io/helm
+          helm repo add sealed-secrets https://bitnami.github.io/sealed-secrets
+          helm repo update
+
+          helm dependency build ./infra/helm-charts
+
+          # Install the umbrella chart so its Sealed Secrets controller is available.
+          # Do not wait for Nextcloud yet; its database Secret is created next.
+          helm upgrade --install nextcloud ./infra/helm-charts \
+            -f ./infra/helm-charts/values.yaml \
+            --set nextcloud.externalDatabase.host="${{ inputs.rds_endpoint }}"
+
+      - name: Create database SealedSecret
+        env:
+          DB_USERNAME: ${{ secrets.DB_USERNAME }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$DB_USERNAME" ] || [ -z "$DB_PASSWORD" ]; then
+            echo "DB_USERNAME or DB_PASSWORD GitHub secret is empty."
+            exit 1
+          fi
+
+          kubectl rollout status deployment/sealed-secrets-controller \
+            -n default --timeout=180s
+
+          kubectl create secret generic db-secrets \
+            --namespace default \
+            --from-literal=DB_USERNAME="$DB_USERNAME" \
+            --from-literal=DB_PASSWORD="$DB_PASSWORD" \
+            --dry-run=client -o yaml \
+            | kubeseal --controller-namespace default --format yaml \
+            | kubectl apply -f -
+
+          # Wait for Sealed Secrets to create the ordinary Kubernetes Secret.
+          for i in $(seq 1 30); do
+            if kubectl get secret db-secrets -n default \
+                -o jsonpath='{.data.DB_USERNAME}' 2>/dev/null | grep -q . \
+              && kubectl get secret db-secrets -n default \
+                -o jsonpath='{.data.DB_PASSWORD}' 2>/dev/null | grep -q .; then
+              echo "Database Secret is available."
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "db-secrets was not created correctly by the Sealed Secrets controller."
+          kubectl get sealedsecrets -n default
+          exit 1
+
+      - name: Deploy and install Nextcloud
+        env:
+          RDS_ENDPOINT: ${{ inputs.rds_endpoint }}
+          ADMIN_USER: ${{ secrets.ADMIN_USER }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$ADMIN_USER" ] || [ -z "$ADMIN_PASSWORD" ]; then
+            echo "ADMIN_USER or ADMIN_PASSWORD GitHub secret is empty."
+            exit 1
+          fi
+
+          helm upgrade --install nextcloud ./infra/helm-charts \
+            -f ./infra/helm-charts/values.yaml \
+            --set nextcloud.externalDatabase.host="$RDS_ENDPOINT" \
+            --set-string nextcloud.nextcloud.username="$ADMIN_USER" \
+            --set-string nextcloud.nextcloud.password="$ADMIN_PASSWORD"
+
+          echo "Waiting for Nextcloud deployment..."
+          kubectl rollout status deployment/nextcloud --timeout=300s
+  
+      - name: Restart Nextcloud and install
+        run: |
+          set -euo pipefail
+
+          kubectl rollout restart deployment/nextcloud
+          kubectl rollout status deployment/nextcloud --timeout=180s
+
+          echo "Checking current installation status..."
+          if ! STATUS=$(kubectl exec deployment/nextcloud -- php occ status 2>&1); then
+            echo "$STATUS"
+            echo "Unable to check Nextcloud installation status."
+            exit 1
+          fi
+
+          if echo "$STATUS" | grep -q 'installed: true'; then
+            echo "Nextcloud is already installed."
+            exit 0
+          fi
+
+          echo "Installing Nextcloud..."
+
+          kubectl exec deployment/nextcloud -- sh -c '
+            php occ maintenance:install \
+              --database=pgsql \
+              --database-host="$POSTGRES_HOST" \
+              --database-name="$POSTGRES_DB" \
+              --database-user="$POSTGRES_USER" \
+              --database-pass="$POSTGRES_PASSWORD" \
+              --admin-user="$NEXTCLOUD_ADMIN_USER" \
+              --admin-pass="$NEXTCLOUD_ADMIN_PASSWORD"
+          '
+
+          echo "Verifying installation..."
+          kubectl exec deployment/nextcloud -- php occ status
