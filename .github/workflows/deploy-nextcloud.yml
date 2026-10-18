@@ -10,7 +10,6 @@ on:
 permissions:
   contents: read
 
-
 jobs:
   deploy-nextcloud:
     runs-on: ubuntu-latest
@@ -137,6 +136,37 @@ jobs:
           sed -i "s/127.0.0.1/$IP/" "$HOME/.kube/config"
           kubectl get nodes
 
+      - name: Pre-stage static acme.json on Host
+        env:
+          ACME_JSON: ${{ secrets.ACME_JSON }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$ACME_JSON" ]; then
+            echo "ACME_JSON secret is empty or not set. Traefik will request a new certificate."
+            exit 0
+          fi
+
+          read -r INSTANCE_ID < <(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=k3s-nextcloud-host" \
+                      "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" \
+            --output text)
+
+          # Escaping single quotes safely for SSM execution
+          ENCODED_ACME=$(echo "$ACME_JSON" | base64 -w 0)
+
+          aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --parameters "{\"commands\":[
+              \"mkdir -p /var/lib/rancher/k3s/storage/traefik-acme\",
+              \"echo '$ENCODED_ACME' | base64 -d > /var/lib/rancher/k3s/storage/traefik-acme/acme.json\",
+              \"chmod 600 /var/lib/rancher/k3s/storage/traefik-acme/acme.json\"
+            ]}"
+
+          echo "Pre-staged acme.json successfully."
+
       - name: Install Sealed Secrets controller
         run: |
           set -euo pipefail
@@ -213,7 +243,7 @@ jobs:
 
           echo "Waiting for Nextcloud deployment..."
           kubectl rollout status deployment/nextcloud --timeout=300s
-  
+
       - name: Restart Nextcloud and install
         run: |
           set -euo pipefail
@@ -248,3 +278,10 @@ jobs:
 
           echo "Verifying installation..."
           kubectl exec deployment/nextcloud -- php occ status
+
+      - name: Verify Nextcloud pod readiness
+        run: |
+          set -euo pipefail
+          kubectl wait --for=condition=Ready pod \
+            -l app.kubernetes.io/instance=nextcloud \
+            --timeout=180s

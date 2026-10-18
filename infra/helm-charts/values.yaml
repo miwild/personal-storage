@@ -1,6 +1,6 @@
 nextcloud:
   nextcloud:
-    host: nextcloud-flourishing.duckdns.org
+    host: nextcloud-demo-flourishing.duckdns.org
     username: admin
     password: "changeme"
     extraEnv:

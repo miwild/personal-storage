@@ -23,7 +23,6 @@ data "terraform_remote_state" "acm" {
   }
 }
 
-
 # 1. Create the Education VPC
 resource "aws_vpc" "education" {
   cidr_block           = "10.0.0.0/16"
@@ -64,7 +63,6 @@ resource "aws_subnet" "education_public_b" {
   }
 }
 
-
 # 3. Create an Internet Gateway
 resource "aws_internet_gateway" "education" {
   vpc_id = aws_vpc.education.id
@@ -101,7 +99,6 @@ resource "aws_route_table_association" "education_public_b" {
   subnet_id      = aws_subnet.education_public_b.id
   route_table_id = aws_route_table.education_public.id
 }
-
 
 variable "ssh_public_key" {
   type = string
@@ -164,7 +161,6 @@ data "aws_ami" "ubuntu" {
   }
 }
 
-
 # Security group attached to the Client VPN endpoint
 resource "aws_security_group" "client_vpn" {
   name        = "education-client-vpn"
@@ -208,7 +204,6 @@ resource "aws_ec2_client_vpn_endpoint" "education" {
   }
 }
 
-
 # Associate the Client VPN with public subnet A
 resource "aws_ec2_client_vpn_network_association" "education" {
   client_vpn_endpoint_id = aws_ec2_client_vpn_endpoint.education.id
@@ -222,7 +217,6 @@ resource "aws_ec2_client_vpn_authorization_rule" "education" {
   authorize_all_groups   = true
 }
 
-
 # 3. Provision the Managed Virtual Machine
 resource "aws_instance" "k3s_server" {
   ami                         = data.aws_ami.ubuntu.id
@@ -231,9 +225,11 @@ resource "aws_instance" "k3s_server" {
   associate_public_ip_address = true
   subnet_id                   = aws_subnet.education_public_a.id
   vpc_security_group_ids      = [aws_security_group.k3s_sg.id]
+
   depends_on = [
     aws_iam_role_policy_attachment.ssm_core
   ]
+
   iam_instance_profile = aws_iam_instance_profile.k3s_ssm_profile.name
 
   # Boot script to install K3s and output configuration keys
@@ -276,16 +272,20 @@ resource "aws_instance" "k3s_server" {
             namespace: kube-system
         spec:
             valuesContent: |
+                additionalArguments:
+                    - "--entrypoints.web.http.redirections.entrypoint.to=:443"
+                    - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+                    - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
                 certificatesResolvers:
-                letsencrypt:
-                    acme:
-                        email: "${var.letsencrypt_email}"
-                        storage: "/data/acme.json"
-                        dnsChallenge:
-                            provider: "duckdns"
+                    letsencrypt:
+                        acme:
+                            email: "${var.letsencrypt_email}"
+                            storage: "/data/acme.json"
+                            dnsChallenge:
+                                provider: "duckdns"
                 env:
-                - name: "DUCKDNS_TOKEN"
-                    value: "${var.duckdns_token}"
+                    - name: "DUCKDNS_TOKEN"
+                      value: "${var.duckdns_token}"
                 accessLog:
                     enabled: true
                 persistence:
@@ -317,7 +317,6 @@ resource "aws_instance" "k3s_server" {
         date
         echo "=== KUBERNETES NODES ==="
         /usr/local/bin/k3s kubectl get nodes -o wide || true
-
         EOF
 
   tags = {
