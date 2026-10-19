@@ -188,13 +188,15 @@ jobs:
           terraform init -input=false
           terraform destroy -auto-approve -input=false
 
-      - name: Remove VPN subnet association
+      - name: Tear down Client VPN
         run: |
           set -euo pipefail
           cd infra/AWS
           terraform init -input=false
           terraform destroy \
+            -target=aws_ec2_client_vpn_authorization_rule.education \
             -target=aws_ec2_client_vpn_network_association.education \
+            -target=aws_ec2_client_vpn_endpoint.education \
             -auto-approve \
             -input=false
 
@@ -293,13 +295,15 @@ jobs:
           terraform init -input=false
           terraform destroy -auto-approve -input=false
 
-      - name: Remove VPN subnet association
+      - name: Tear down Client VPN
         run: |
           set -euo pipefail
           cd infra/AWS
           terraform init -input=false
           terraform destroy \
+            -target=aws_ec2_client_vpn_authorization_rule.education \
             -target=aws_ec2_client_vpn_network_association.education \
+            -target=aws_ec2_client_vpn_endpoint.education \
             -auto-approve \
             -input=false
 
