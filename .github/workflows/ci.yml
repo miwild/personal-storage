@@ -14,11 +14,20 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
 
       - name: Validate Terraform configurations
+        env:
+          TF_IN_AUTOMATION: "1"
         run: |
           set -euo pipefail
-          find infra -name '*.tf' -exec dirname {} \; | sort -u | while read dir; do
+          # `terraform validate` resolves providers from .terraform.lock.hcl, so each
+          # root module must be initialized first. `-backend=false` keeps the init
+          # offline-safe: no S3 backend (and no AWS credentials) are required to validate.
+          find infra -name '*.tf' -exec dirname {} \; | sort -u | while read -r dir; do
             echo "Validating $dir"
-            (cd "$dir" && terraform validate)
+            (
+              cd "$dir"
+              terraform init -backend=false -input=false
+              terraform validate
+            )
           done
 
       - name: Validate GitHub Actions workflows
