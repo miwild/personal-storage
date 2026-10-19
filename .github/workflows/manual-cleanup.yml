@@ -71,23 +71,15 @@ jobs:
           printf '%s' "$VPN_CA_CERT" > "$TF_VAR_vpn_pki_path/ca.crt"
 
       - name: Destroy RDS
+        if: always()
         run: |
           set -euo pipefail
           cd infra/AWS/RDS
           terraform init -input=false
           terraform destroy -auto-approve -input=false
 
-      - name: Remove VPN subnet association
-        run: |
-          set -euo pipefail
-          cd infra/AWS
-          terraform init -input=false
-          terraform destroy \
-            -target=aws_ec2_client_vpn_network_association.education \
-            -auto-approve \
-            -input=false
-
       - name: Destroy EC2 and Elastic IP
+        if: always()
         run: |
           set -euo pipefail
           cd infra/AWS
@@ -96,6 +88,19 @@ jobs:
             -target=aws_instance.k3s_server \
             -target=aws_eip_association.k3s_assoc \
             -target=aws_eip.k3s_ip \
+            -auto-approve \
+            -input=false
+
+      - name: Tear down Client VPN
+        if: always()
+        run: |
+          set -euo pipefail
+          cd infra/AWS
+          terraform init -input=false
+          terraform destroy \
+            -target=aws_ec2_client_vpn_authorization_rule.education \
+            -target=aws_ec2_client_vpn_network_association.education \
+            -target=aws_ec2_client_vpn_endpoint.education \
             -auto-approve \
             -input=false
 

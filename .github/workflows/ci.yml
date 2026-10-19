@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Validate Terraform configurations
+        run: |
+          set -euo pipefail
+          find infra -name '*.tf' -exec dirname {} \; | sort -u | while read dir; do
+            echo "Validating $dir"
+            (cd "$dir" && terraform validate)
+          done
+
+      - name: Validate GitHub Actions workflows
+        run: |
+          set -euo pipefail
+          find .github/workflows -name '*.yml' -o -name '*.yaml' | while read workflow; do
+            echo "Validating $workflow"
+            # Basic YAML validation using yq (pre-installed on GitHub runners)
+            yq eval '.' "$workflow" >/dev/null
+          done
