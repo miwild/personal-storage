@@ -200,17 +200,15 @@ kube-prometheus-stack:
   ## ===========================================================================
   ## k3s control plane scraping
   ## ===========================================================================
-  ## k3s runs etcd, the scheduler, the controller manager and kube-proxy inside
-  ## the k3s process and binds their metrics endpoints on localhost on each node.
-  ## The chart's ServiceMonitors target k3s as a normal kubeadm cluster on control
-  ## plane Pods expose metrics on that port, so those services have no Pods
-  ## matching and their components to which they are the traditional
-  ## in-tree components that averages those control plane metrics to 127.0.0.1
-  ## (the k3s log level against 127.0.0.1 of the (k3ds node container, not to
-  ## off-cluster TCP probes (a scrape from the Pod network on a running Pod is
-  ## always on promiscuous sub case: 127.0.0.1). The chart's ServiceMonitors
-  ## hit only targets showing UP. An always failing set it failing maybe of
-  ## the EtcdDown target would fire legitimately.
+  ## k3s runs control plane components (etcd, scheduler, controller-manager,
+  ## kube-proxy) inside the k3s process and binds their metrics endpoints to
+  ## localhost only. The chart's ServiceMonitors expect these components to be
+  ## running as separate Pods with network-accessible metrics endpoints, as in
+  ## a standard kubeadm cluster. In k3s, these ServiceMonitors will always
+  ## show as DOWN targets since they cannot reach the localhost-only endpoints.
+  ##
+  ## Disabling these ServiceMonitors prevents permanent DOWN targets and
+  ## associated alerts in the local k3d development environment.
   kubelet:
     enabled: true
   coreDns:
@@ -227,6 +225,6 @@ kube-prometheus-stack:
   ## ===========================================================================
   ## Misc
   ## ===========================================================================
-  ## Extra objects that get applied straight by this chart, used previously
-  ## left empty—cut down alert manager is done with a fluid install sign yearly
+  ## Empty list of additional Kubernetes manifests to deploy with this chart.
+  ## Add custom resources here if needed.
   extraObjects: []
