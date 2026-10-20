@@ -103,6 +103,8 @@ kube-prometheus-stack:
       remoteWrite: []
       ## External URL is left unset: Prometheus is reached through the
       ## host-based IngressRoute (prometheus.local.example.com).
+      ## Use the dedicated service account created by the chart for RBAC.
+      serviceAccountName: observability-umbrella-kub-prometheus
 
   # Alertmanager service configuration
   alertmanager:
@@ -136,6 +138,8 @@ kube-prometheus-stack:
         receivers: []
         routes:
           receiver: ""
+      ## Use the dedicated service account created by the chart for RBAC.
+      serviceAccountName: observability-umbrella-kub-alertmanager
 
   # Grafana service configuration
   grafana:
@@ -169,6 +173,13 @@ kube-prometheus-stack:
     ## Prometheus datasource is provisioned by the chart and points at the
     ## in-cluster Prometheus service, see README.
     additionalDataSources: {}
+    ## Explicitly use the dedicated service account created by the chart
+    ## to ensure proper RBAC for sidecar containers.
+    serviceAccount:
+      create: true
+      name: ""
+    rbac:
+      create: true
 
   # kube-state-metrics service configuration
   kube-state-metrics:
@@ -221,6 +232,20 @@ kube-prometheus-stack:
     enabled: false
   kubeProxy:
     enabled: false
+
+  ## Explicitly set service accounts for all components to avoid using pi-agent
+  prometheusOperator:
+    serviceAccount:
+      create: true
+      name: ""
+  kubeStateMetrics:
+    serviceAccount:
+      create: true
+      name: ""
+  prometheus-node-exporter:
+    serviceAccount:
+      create: true
+      name: ""
 
   ## ===========================================================================
   ## Misc
