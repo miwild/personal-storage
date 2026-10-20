@@ -1,3 +1,4 @@
+
 name: Deploy Observability
 
 on:
@@ -40,6 +41,120 @@ jobs:
           kubectl version --client
           helm version
           aws --version
+
+      - name: Verify infrastructure readiness
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DEMO_STATUS_KV_NAMESPACE_ID: ${{ secrets.DEMO_STATUS_KV_NAMESPACE_ID }}
+        run: |
+          set -euo pipefail
+
+          # Do not deploy while scheduled or manual cleanup is running.
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] ||
+             [ -z "$CLOUDFLARE_ACCOUNT_ID" ] ||
+             [ -z "$DEMO_STATUS_KV_NAMESPACE_ID" ]; then
+            echo "Cloudflare KV credentials or namespace configuration are missing."
+            exit 1
+          fi
+
+          STATUS_FILE=$(mktemp)
+          trap 'rm -f "$STATUS_FILE"' EXIT
+
+          HTTP_STATUS=$(curl --silent --show-error \
+            --output "$STATUS_FILE" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces/${DEMO_STATUS_KV_NAMESPACE_ID}/values/cleanupStatus")
+
+          case "$HTTP_STATUS" in
+            200)
+              CLEANUP_STATUS=$(cat "$STATUS_FILE")
+              if [ "$CLEANUP_STATUS" = "running" ]; then
+                echo "Infrastructure is not ready: cleanup is currently running."
+                exit 1
+              fi
+              ;;
+            404)
+              echo "No active cleanup status found."
+              ;;
+            *)
+              echo "Could not verify cleanup status (HTTP $HTTP_STATUS)."
+              cat "$STATUS_FILE"
+              exit 1
+              ;;
+          esac
+
+          # Find the currently running K3s host.
+          INSTANCE_INFO=$(aws ec2 describe-instances \
+            --region ca-central-1 \
+            --filters \
+              "Name=tag:Name,Values=k3s-nextcloud-host" \
+              "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].[InstanceId,PrivateIpAddress]' \
+            --output text)
+
+          if [ -z "$INSTANCE_INFO" ] || [ "$INSTANCE_INFO" = "None" ]; then
+            echo "Infrastructure is not ready: no running K3s instance found."
+            exit 1
+          fi
+
+          read -r INSTANCE_ID PRIVATE_IP <<< "$INSTANCE_INFO"
+
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ] ||
+             [ -z "$PRIVATE_IP" ] || [ "$PRIVATE_IP" = "None" ]; then
+            echo "Could not determine the running K3s instance details."
+            exit 1
+          fi
+
+          echo "Found K3s instance: $INSTANCE_ID"
+
+          # Wait up to 10 minutes for both AWS status checks to pass.
+          INSTANCE_READY=false
+
+          for i in $(seq 1 40); do
+            STATUS=$(aws ec2 describe-instance-status \
+              --region ca-central-1 \
+              --instance-ids "$INSTANCE_ID" \
+              --query 'InstanceStatuses[0].[InstanceStatus.Status,SystemStatus.Status]' \
+              --output text)
+
+            read -r INSTANCE_STATUS SYSTEM_STATUS <<< "$STATUS"
+
+            if [ "$INSTANCE_STATUS" = "ok" ] &&
+               [ "$SYSTEM_STATUS" = "ok" ]; then
+              INSTANCE_READY=true
+              break
+            fi
+
+            echo "Waiting for EC2 status checks ($i/40): instance=${INSTANCE_STATUS:-unknown}, system=${SYSTEM_STATUS:-unknown}"
+            sleep 15
+          done
+
+          if [ "$INSTANCE_READY" != true ]; then
+            echo "Infrastructure is not ready: EC2 status checks did not pass."
+            exit 1
+          fi
+
+          # Check cleanup status again to reduce the chance of a race.
+          HTTP_STATUS=$(curl --silent --show-error \
+            --output "$STATUS_FILE" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces/${DEMO_STATUS_KV_NAMESPACE_ID}/values/cleanupStatus")
+
+          if [ "$HTTP_STATUS" = "200" ] &&
+             [ "$(cat "$STATUS_FILE")" = "running" ]; then
+            echo "Infrastructure is not ready: cleanup started during the readiness check."
+            exit 1
+          elif [ "$HTTP_STATUS" != "200" ] &&
+               [ "$HTTP_STATUS" != "404" ]; then
+            echo "Could not recheck cleanup status (HTTP $HTTP_STATUS)."
+            cat "$STATUS_FILE"
+            exit 1
+          fi
+
+          echo "Infrastructure readiness checks passed."
 
       - name: Connect to Client VPN
         env:
@@ -218,7 +333,7 @@ jobs:
       - name: Apply Traefik IngressRoutes
         run: |
           set -euo pipefail
-          ROUTES=infra/Kubernetes/templates/traefik/observability-ingressroute.yaml
+          ROUTES=infra/Kubernetes/templates/traefik/ingress.yaml
 
           if ! kubectl get crd ingressroutes.traefik.io >/dev/null 2>&1; then
             echo "::warning file=$ROUTES::Traefik CRDs are not installed; skipping IngressRoutes."
