@@ -1,0 +1,20 @@
+apiVersion: v2
+name: observability-umbrella
+description: Shared wrapper chart for the upstream kube-prometheus-stack (Grafana, Prometheus, Alertmanager)
+type: application
+version: 0.1.0
+appVersion: "92.11.0"
+
+# Chart-wide assumptions for this environment:
+#   * Upstream chart: prometheus-community/kube-prometheus-stack, pinned below.
+#   * Namespace: platform-observability (created by
+#     templates/namespaces/platform-namespaces.yaml, which is admin-owned;
+#     this chart does not create namespaces).
+#   * Intended Kubernetes version: k3s (the production cluster also runs k3s,
+#     so k3s-specific ServiceMonitor tuning applies here too).
+
+dependencies:
+  - name: kube-prometheus-stack
+    alias: kube-prometheus-stack
+    version: 92.11.0
+    repository: "https://prometheus-community.github.io/helm-charts"
