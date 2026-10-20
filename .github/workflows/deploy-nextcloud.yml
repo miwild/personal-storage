@@ -1,14 +1,21 @@
+
 name: Deploy Nextcloud
 
 on:
   workflow_call:
+  workflow_dispatch:
     inputs:
       rds_endpoint:
+        description: RDS endpoint hostname
         required: true
         type: string
 
 permissions:
   contents: read
+
+concurrency:
+  group: nextcloud-app-deploy
+  cancel-in-progress: false
 
 jobs:
   deploy-nextcloud:
@@ -29,8 +36,123 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ca-central-1
 
+      - name: Verify infrastructure readiness
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DEMO_STATUS_KV_NAMESPACE_ID: ${{ secrets.DEMO_STATUS_KV_NAMESPACE_ID }}
+        run: |
+          set -euo pipefail
+
+          # Do not deploy while scheduled or manual cleanup is running.
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] ||
+             [ -z "$CLOUDFLARE_ACCOUNT_ID" ] ||
+             [ -z "$DEMO_STATUS_KV_NAMESPACE_ID" ]; then
+            echo "Cloudflare KV credentials or namespace configuration are missing."
+            exit 1
+          fi
+
+          STATUS_FILE=$(mktemp)
+          trap 'rm -f "$STATUS_FILE"' EXIT
+
+          HTTP_STATUS=$(curl --silent --show-error \
+            --output "$STATUS_FILE" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces/${DEMO_STATUS_KV_NAMESPACE_ID}/values/cleanupStatus")
+
+          case "$HTTP_STATUS" in
+            200)
+              CLEANUP_STATUS=$(cat "$STATUS_FILE")
+              if [ "$CLEANUP_STATUS" = "running" ]; then
+                echo "Infrastructure is not ready: cleanup is currently running."
+                exit 1
+              fi
+              ;;
+            404)
+              echo "No active cleanup status found."
+              ;;
+            *)
+              echo "Could not verify cleanup status (HTTP $HTTP_STATUS)."
+              cat "$STATUS_FILE"
+              exit 1
+              ;;
+          esac
+
+          # Find the currently running K3s host.
+          INSTANCE_INFO=$(aws ec2 describe-instances \
+            --region ca-central-1 \
+            --filters \
+              "Name=tag:Name,Values=k3s-nextcloud-host" \
+              "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].[InstanceId,PrivateIpAddress]' \
+            --output text)
+
+          if [ -z "$INSTANCE_INFO" ] || [ "$INSTANCE_INFO" = "None" ]; then
+            echo "Infrastructure is not ready: no running K3s instance found."
+            exit 1
+          fi
+
+          read -r INSTANCE_ID PRIVATE_IP <<< "$INSTANCE_INFO"
+
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ] ||
+             [ -z "$PRIVATE_IP" ] || [ "$PRIVATE_IP" = "None" ]; then
+            echo "Could not determine the running K3s instance details."
+            exit 1
+          fi
+
+          echo "Found K3s instance: $INSTANCE_ID"
+
+          # Wait up to 10 minutes for both AWS status checks to pass.
+          INSTANCE_READY=false
+
+          for i in $(seq 1 40); do
+            STATUS=$(aws ec2 describe-instance-status \
+              --region ca-central-1 \
+              --instance-ids "$INSTANCE_ID" \
+              --query 'InstanceStatuses[0].[InstanceStatus.Status,SystemStatus.Status]' \
+              --output text)
+
+            read -r INSTANCE_STATUS SYSTEM_STATUS <<< "$STATUS"
+
+            if [ "$INSTANCE_STATUS" = "ok" ] &&
+               [ "$SYSTEM_STATUS" = "ok" ]; then
+              INSTANCE_READY=true
+              break
+            fi
+
+            echo "Waiting for EC2 status checks ($i/40): instance=${INSTANCE_STATUS:-unknown}, system=${SYSTEM_STATUS:-unknown}"
+            sleep 15
+          done
+
+          if [ "$INSTANCE_READY" != true ]; then
+            echo "Infrastructure is not ready: EC2 status checks did not pass."
+            exit 1
+          fi
+
+          # Check cleanup status again to reduce the chance of a race.
+          HTTP_STATUS=$(curl --silent --show-error \
+            --output "$STATUS_FILE" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces/${DEMO_STATUS_KV_NAMESPACE_ID}/values/cleanupStatus")
+
+          if [ "$HTTP_STATUS" = "200" ] &&
+             [ "$(cat "$STATUS_FILE")" = "running" ]; then
+            echo "Infrastructure is not ready: cleanup started during the readiness check."
+            exit 1
+          elif [ "$HTTP_STATUS" != "200" ] &&
+               [ "$HTTP_STATUS" != "404" ]; then
+            echo "Could not recheck cleanup status (HTTP $HTTP_STATUS)."
+            cat "$STATUS_FILE"
+            exit 1
+          fi
+
+          echo "Infrastructure readiness checks passed."
+
       - name: Install kubeseal and OpenVPN
         run: |
+          set -euo pipefail
           curl -fsSL "https://github.com/bitnami-labs/sealed-secrets/releases/download/v0.27.3/kubeseal-0.27.3-linux-amd64.tar.gz" \
             | sudo tar -xz -C /usr/local/bin kubeseal
 
@@ -58,6 +180,11 @@ jobs:
             exit 1
           fi
 
+          if [ -z "$VPN_CLIENT_CERT" ] || [ -z "$VPN_CLIENT_KEY" ]; then
+            echo "VPN_CLIENT_CERT or VPN_CLIENT_KEY is missing."
+            exit 1
+          fi
+
           aws ec2 export-client-vpn-client-configuration \
             --client-vpn-endpoint-id "$ENDPOINT_ID" \
             --output text > client.ovpn
@@ -80,10 +207,10 @@ jobs:
             sleep 5
           done
 
-          ip addr show tun0 || {
+          if ! ip addr show tun0 >/dev/null 2>&1; then
             cat /tmp/openvpn.log
             exit 1
-          }
+          fi
 
       - name: Configure Kubernetes through SSM
         run: |
@@ -95,7 +222,8 @@ jobs:
             --query "Reservations[0].Instances[0].[InstanceId,PrivateIpAddress]" \
             --output text)
 
-          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ] ||
+             [ -z "$IP" ] || [ "$IP" = "None" ]; then
             echo "No running k3s instance found."
             exit 1
           fi
@@ -153,7 +281,6 @@ jobs:
             --query "Reservations[0].Instances[0].InstanceId" \
             --output text)
 
-          # Escaping single quotes safely for SSM execution
           ENCODED_ACME=$(echo "$ACME_JSON" | base64 -w 0)
 
           aws ssm send-command \
@@ -180,6 +307,8 @@ jobs:
           # Install the umbrella chart so its Sealed Secrets controller is available.
           # Do not wait for Nextcloud yet; its database Secret is created next.
           helm upgrade --install nextcloud ./infra/Kubernetes/helm-charts \
+            --namespace platform-nextcloud \
+            --create-namespace \
             -f ./infra/Kubernetes/helm-charts/values.yaml \
             --set nextcloud.externalDatabase.host="${{ inputs.rds_endpoint }}"
 
@@ -199,18 +328,17 @@ jobs:
             -n default --timeout=180s
 
           kubectl create secret generic db-secrets \
-            --namespace default \
+            --namespace platform-nextcloud \
             --from-literal=DB_USERNAME="$DB_USERNAME" \
             --from-literal=DB_PASSWORD="$DB_PASSWORD" \
             --dry-run=client -o yaml \
             | kubeseal --controller-namespace default --format yaml \
             | kubectl apply -f -
 
-          # Wait for Sealed Secrets to create the ordinary Kubernetes Secret.
           for i in $(seq 1 30); do
-            if kubectl get secret db-secrets -n default \
+            if kubectl get secret db-secrets -n platform-nextcloud \
                 -o jsonpath='{.data.DB_USERNAME}' 2>/dev/null | grep -q . \
-              && kubectl get secret db-secrets -n default \
+              && kubectl get secret db-secrets -n platform-nextcloud \
                 -o jsonpath='{.data.DB_PASSWORD}' 2>/dev/null | grep -q .; then
               echo "Database Secret is available."
               exit 0
@@ -219,7 +347,7 @@ jobs:
           done
 
           echo "db-secrets was not created correctly by the Sealed Secrets controller."
-          kubectl get sealedsecrets -n default
+          kubectl get sealedsecrets -n platform-nextcloud
           exit 1
 
       - name: Deploy and install Nextcloud
@@ -230,12 +358,18 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [ -z "$RDS_ENDPOINT" ]; then
+            echo "RDS_ENDPOINT is empty."
+            exit 1
+          fi
+
           if [ -z "$ADMIN_USER" ] || [ -z "$ADMIN_PASSWORD" ]; then
             echo "ADMIN_USER or ADMIN_PASSWORD GitHub secret is empty."
             exit 1
           fi
 
           helm upgrade --install nextcloud ./infra/Kubernetes/helm-charts \
+            --namespace platform-nextcloud \
             -f ./infra/Kubernetes/helm-charts/values.yaml \
             --set nextcloud.externalDatabase.host="$RDS_ENDPOINT" \
             --set-string nextcloud.nextcloud.username="$ADMIN_USER" \
