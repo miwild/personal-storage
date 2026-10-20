@@ -1,0 +1,55 @@
+# -----------------------------------------------------------------------------
+# Shared Traefik IngressRoute for the observability stack (Grafana, Prometheus).
+# Namespace: platform-observability
+#
+# Before applying this file:
+#   1. Ensure Traefik CRDs (ingressroutes.traefik.io) are installed on the cluster.
+#   2. Configure DuckDNS hostnames for Grafana and Prometheus.  The production
+#      DuckDNS domain is "nextcloud-demo-flourishing" — each sub-domain must be
+#      registered in the DuckDNS account and the terraform.yml workflow must
+#      update them (currently only updates nextcloud-demo-flourishing).
+#   3. Replace placeholder hostnames with the actual hostnames you intend to use.
+#
+# After applying, obtain Grafana admin credentials:
+#   kubectl -n platform-observability get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d
+# -----------------------------------------------------------------------------
+---
+# Grafana route
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: grafana-secure
+  namespace: platform-observability
+  labels:
+    app.kubernetes.io/part-of: observability-umbrella
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`grafana-placeholder.flourishing.workers.dev`)
+      kind: Rule
+      services:
+        - name: observability-umbrella-grafana
+          port: 80
+  tls:
+    certResolver: letsencrypt
+---
+# Prometheus route
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: prometheus-secure
+  namespace: platform-observability
+  labels:
+    app.kubernetes.io/part-of: observability-umbrella
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`prometheus-placeholder.flourishing.workers.dev`)
+      kind: Rule
+      services:
+        - name: observability-umbrella-kub-prometheus
+          port: 9090
+  tls:
+    certResolver: letsencrypt

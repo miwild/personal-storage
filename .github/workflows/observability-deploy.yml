@@ -1,0 +1,258 @@
+name: Deploy Observability
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: observability-deploy
+  cancel-in-progress: false
+
+env:
+  NAMESPACE: platform-observability
+  RELEASE: observability-umbrella
+  CHART: ./infra/Kubernetes/helm-charts/observability-umbrella
+
+jobs:
+  deploy-observability:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+
+      - uses: azure/setup-helm@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ca-central-1
+
+      - name: Verify deployment tools
+        run: |
+          set -euo pipefail
+          kubectl version --client
+          helm version
+          aws --version
+
+      - name: Connect to Client VPN
+        env:
+          VPN_CLIENT_CERT: ${{ secrets.VPN_CLIENT_CERT }}
+          VPN_CLIENT_KEY: ${{ secrets.VPN_CLIENT_KEY }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y openvpn
+
+          ENDPOINT_ID=$(aws ec2 describe-client-vpn-endpoints \
+            --query "ClientVpnEndpoints[?Tags[?Key=='Name' && Value=='education-client-vpn']].ClientVpnEndpointId | [0]" \
+            --output text)
+
+          if [ -z "$ENDPOINT_ID" ] || [ "$ENDPOINT_ID" = "None" ]; then
+            echo "No Client VPN endpoint found. Is the stack up?"
+            exit 1
+          fi
+
+          if [ -z "$VPN_CLIENT_CERT" ] || [ -z "$VPN_CLIENT_KEY" ]; then
+            echo "VPN_CLIENT_CERT or VPN_CLIENT_KEY is missing."
+            exit 1
+          fi
+
+          aws ec2 export-client-vpn-client-configuration \
+            --client-vpn-endpoint-id "$ENDPOINT_ID" \
+            --output text > client.ovpn
+
+          {
+            printf '\n<cert>\n%s\n</cert>\n' "$VPN_CLIENT_CERT"
+            printf '<key>\n%s\n</key>\n' "$VPN_CLIENT_KEY"
+          } >> client.ovpn
+
+          chmod 600 client.ovpn
+          sudo openvpn --config client.ovpn --daemon --log /tmp/openvpn.log
+
+          for i in $(seq 1 120); do
+            if ip addr show tun0 >/dev/null 2>&1; then
+              break
+            fi
+            sleep 5
+          done
+
+          if ! ip addr show tun0 >/dev/null 2>&1; then
+            cat /tmp/openvpn.log
+            exit 1
+          fi
+
+      - name: Configure Kubernetes through SSM
+        run: |
+          set -euo pipefail
+
+          INSTANCE_INFO=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=k3s-nextcloud-host" \
+                      "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].[InstanceId,PrivateIpAddress]" \
+            --output text)
+
+          read -r INSTANCE_ID IP <<< "$INSTANCE_INFO"
+
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ] ||
+             [ -z "$IP" ] || [ "$IP" = "None" ]; then
+            echo "No running k3s instance found."
+            exit 1
+          fi
+
+          mkdir -p "$HOME/.kube"
+          KUBECONFIG_TMP=$(mktemp)
+          trap 'rm -f "$KUBECONFIG_TMP"' EXIT
+          READY=false
+
+          for i in $(seq 1 40); do
+            COMMAND_ID=$(aws ssm send-command \
+              --instance-ids "$INSTANCE_ID" \
+              --document-name AWS-RunShellScript \
+              --parameters '{"commands":["test -s /etc/rancher/k3s/k3s.yaml && /usr/local/bin/k3s kubectl get nodes | grep -qw Ready && cat /etc/rancher/k3s/k3s.yaml"]}' \
+              --query 'Command.CommandId' \
+              --output text) || {
+                sleep 10
+                continue
+              }
+
+            if aws ssm wait command-executed \
+                 --command-id "$COMMAND_ID" \
+                 --instance-id "$INSTANCE_ID"; then
+              aws ssm get-command-invocation \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$INSTANCE_ID" \
+                --query 'StandardOutputContent' \
+                --output text > "$KUBECONFIG_TMP"
+
+              if [ -s "$KUBECONFIG_TMP" ] &&
+                 grep -q 'server: https://127.0.0.1:6443' "$KUBECONFIG_TMP"; then
+                READY=true
+                break
+              fi
+            fi
+
+            sleep 10
+          done
+
+          if [ "$READY" != true ]; then
+            echo "K3s did not become ready or its kubeconfig was not retrieved."
+            exit 1
+          fi
+
+          sed "s|https://127.0.0.1:6443|https://${IP}:6443|" \
+            "$KUBECONFIG_TMP" > "$HOME/.kube/config"
+
+          chmod 600 "$HOME/.kube/config"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
+          kubectl get nodes
+
+      - name: Apply namespaces
+        run: |
+          set -euo pipefail
+          kubectl apply \
+            -f infra/Kubernetes/templates/namespaces/platform-namespaces.yaml
+          kubectl get namespace "$NAMESPACE"
+
+      - name: Create Grafana admin Secret
+        env:
+          GRAFANA_ADMIN_USER: ${{ secrets.GRAFANA_ADMIN_USER }}
+          GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$GRAFANA_ADMIN_USER" ] ||
+             [ -z "$GRAFANA_ADMIN_PASSWORD" ]; then
+            echo "GRAFANA_ADMIN_USER and GRAFANA_ADMIN_PASSWORD must both be configured in GitHub Actions secrets."
+            exit 1
+          fi
+
+          kubectl create secret generic grafana-admin \
+            --namespace "$NAMESPACE" \
+            --from-literal=admin-user="$GRAFANA_ADMIN_USER" \
+            --from-literal=admin-password="$GRAFANA_ADMIN_PASSWORD" \
+            --dry-run=client -o yaml |
+            kubectl apply -f -
+
+          kubectl get secret grafana-admin -n "$NAMESPACE"
+
+      - name: Build chart dependencies and validate
+        run: |
+          set -euo pipefail
+
+          helm repo add prometheus-community \
+            https://prometheus-community.github.io/helm-charts
+          helm repo update
+          helm dependency build "$CHART"
+          helm lint "$CHART"
+
+          helm template "$RELEASE" "$CHART" \
+            --namespace "$NAMESPACE" \
+            -f "$CHART/values.yaml" \
+            > /tmp/observability-rendered.yaml
+
+          echo "Helm template validation passed."
+
+      - name: Deploy observability-umbrella
+        run: |
+          set -euo pipefail
+
+          helm upgrade --install "$RELEASE" "$CHART" \
+            -f "$CHART/values.yaml" \
+            --namespace "$NAMESPACE" \
+            --wait \
+            --timeout 10m
+
+          kubectl wait --for=condition=Ready \
+            pod -l app.kubernetes.io/instance="$RELEASE" \
+            -n "$NAMESPACE" \
+            --timeout=600s
+
+      - name: Apply Traefik IngressRoutes
+        run: |
+          set -euo pipefail
+          ROUTES=infra/Kubernetes/templates/traefik/observability-ingressroute.yaml
+
+          if ! kubectl get crd ingressroutes.traefik.io >/dev/null 2>&1; then
+            echo "::warning file=$ROUTES::Traefik CRDs are not installed; skipping IngressRoutes."
+            exit 0
+          fi
+
+          if grep -q 'placeholder' "$ROUTES"; then
+            echo "::warning file=$ROUTES::IngressRoutes were not applied because hostnames remain placeholders."
+            exit 0
+          fi
+
+          kubectl apply -f "$ROUTES"
+
+      - name: Verify deployment
+        run: |
+          set -euo pipefail
+
+          echo "=== Kubernetes context ==="
+          kubectl config current-context
+
+          echo "=== Pods ==="
+          kubectl get pods -n "$NAMESPACE" \
+            -l app.kubernetes.io/instance="$RELEASE"
+
+          echo "=== Services ==="
+          kubectl get svc -n "$NAMESPACE"
+
+          echo "=== Grafana Secret keys (values are not displayed) ==="
+          kubectl get secret grafana-admin -n "$NAMESPACE" \
+            -o jsonpath='{.data}' | jq -r 'keys[]'
+
+          echo "=== Alertmanager receiver configuration ==="
+          kubectl get secret "alertmanager-$RELEASE-kub-alertmanager" \
+            -n "$NAMESPACE" \
+            -o jsonpath='{.data.alertmanager\.yaml}' |
+            base64 -d |
+            sed -n '/^receivers:/,/^templates:/p'
