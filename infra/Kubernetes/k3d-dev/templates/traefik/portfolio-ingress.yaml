@@ -30,12 +30,12 @@ spec:
     - match: Host(`grafana.local.example.com`) && PathPrefix(`/`)
       kind: Rule
       services:
-        - name: grafana
-          port: 3000
+        - name: kube-prometheus-stack-grafana
+          port: 80
     - match: Host(`prometheus.local.example.com`) && PathPrefix(`/`)
       kind: Rule
       services:
-        - name: prometheus-server
+        - name: kube-prometheus-stack-prometheus
           port: 9090
     - match: Host(`loki.local.example.com`) && PathPrefix(`/`)
       kind: Rule
