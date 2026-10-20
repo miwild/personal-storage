@@ -1,6 +1,12 @@
 # Test that dev resources have appropriate names and configurations
 
-mock_provider "aws" {}
+mock_provider "aws" {
+  mock_data "aws_availability_zones" {
+    defaults = {
+      names = ["ca-central-1a", "ca-central-1b"]
+    }
+  }
+}
 
 variables {
   dev_prefix = "dev/"

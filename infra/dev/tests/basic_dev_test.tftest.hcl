@@ -1,6 +1,12 @@
 # Basic test for dev environment configuration
 
-mock_provider "aws" {}
+mock_provider "aws" {
+  mock_data "aws_availability_zones" {
+    defaults = {
+      names = ["ca-central-1a", "ca-central-1b"]
+    }
+  }
+}
 
 run "validate_dev_naming" {
   command = plan
