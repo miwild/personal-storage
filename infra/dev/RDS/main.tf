@@ -24,7 +24,7 @@ variable "db_password" {
   description = "Database password"
   type        = string
   sensitive   = true
-  default     = "devpassword123"  # Default for dev only
+  default     = "devpassword123" # Default for dev only
 }
 
 variable "dev_prefix" {
@@ -45,7 +45,7 @@ data "aws_subnets" "education_dev_public" {
     name   = "vpc-id"
     values = [data.aws_vpc.education_dev.id]
   }
-  
+
   filter {
     name   = "tag:Tier"
     values = ["public"]
@@ -69,7 +69,7 @@ resource "aws_security_group" "rds_dev" {
     from_port   = 5432
     to_port     = 5432
     protocol    = "tcp"
-    cidr_blocks = ["10.1.0.0/16"]  # Dev VPC CIDR
+    cidr_blocks = ["10.1.0.0/16"] # Dev VPC CIDR
   }
 
   egress {

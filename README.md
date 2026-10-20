@@ -33,3 +33,7 @@ The demo uses Cloudflare and GitHub Actions to trigger deployment on demand. The
 - **GitHub Actions** — Automated provisioning and cleanup
 - **Cloudflare Workers & Pages** — Demo frontend and deployment trigger
 - **Nextcloud** — Self-hosted file storage application
+
+## Development Environment
+
+The development environment uses the same infrastructure code but with isolated state files (prefixed with `dev/`). Unlike production, dev environments are not automatically cleaned up and will continue incurring charges until manually destroyed. It is recommended to set up AWS budget alerts to monitor costs.

@@ -15,7 +15,7 @@ provider "aws" {
 
 # Variables for dev environment
 variable "ssh_public_key" {
-  type = string
+  type    = string
   default = ""
 }
 
@@ -44,7 +44,7 @@ variable "dev_prefix" {
 
 # 1. Create the Education VPC for dev
 resource "aws_vpc" "education_dev" {
-  cidr_block           = "10.1.0.0/16"  # Different CIDR than production
+  cidr_block           = "10.1.0.0/16" # Different CIDR than production
   enable_dns_support   = true
   enable_dns_hostnames = true
 

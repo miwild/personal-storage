@@ -6,6 +6,15 @@
 
 set -euo pipefail
 
+DEV_ACCOUNT_ID="${DEV_ACCOUNT_ID:-}"
+REGION="ca-central-1"
+
+# Check that DEV_ACCOUNT_ID is set
+if [[ -z "$DEV_ACCOUNT_ID" ]]; then
+  echo "ERROR: DEV_ACCOUNT_ID environment variable must be set"
+  exit 1
+fi
+
 echo "=== Applying Dev Terraform Configurations ==="
 echo "WARNING: This will create actual AWS resources in your account!"
 
@@ -29,12 +38,26 @@ if [[ "$confirmation" != "yes" ]]; then
   exit 0
 fi
 
-# Check AWS credentials
-echo "Checking AWS credentials..."
-aws sts get-caller-identity >/dev/null || {
-  echo "ERROR: AWS credentials not configured or invalid"
+# Check AWS credentials match required dev account
+CREDENTIALS_ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text 2>/dev/null)
+if [[ "$CREDENTIALS_ACCOUNT_ID" != "$DEV_ACCOUNT_ID" ]]; then
+  echo "ERROR: AWS credentials do not match required dev account ID"
+  echo "Expected: $DEV_ACCOUNT_ID"
+  echo "Found: $CREDENTIALS_ACCOUNT_ID"
   exit 1
-}
+fi
+
+echo "✓ AWS credentials verified for dev account"
+
+# Check AWS region
+CONFIGURED_REGION=$(aws configure get region 2>/dev/null)
+if [[ "$CONFIGURED_REGION" != "$REGION" ]]; then
+  echo "ERROR: AWS region must be set to $REGION"
+  echo "Current region: $CONFIGURED_REGION"
+  exit 1
+fi
+
+echo "✓ AWS region verified as $REGION"
 
 # Apply each module in order
 MODULES=("AWS" "RDS")  # ACM is minimal in dev
@@ -45,10 +68,14 @@ for module in "${MODULES[@]}"; do
     cd "infra/dev/$module"
     
     # Check backend configuration
-    if ! grep -q "key.*dev/" terraform.tfstate; then
-      echo "ERROR: Backend key does not contain 'dev/' prefix in $module"
+    BACKEND_KEY=$(grep -o "key.*\"[^\"]*\".*" main.tf | cut -d\" -f2)
+    if [[ ! "$BACKEND_KEY" =~ ^dev/ ]]; then
+      echo "ERROR: Backend key does not start with 'dev/' prefix in $module"
+      echo "Found: $BACKEND_KEY"
       exit 1
     fi
+    
+    echo "✓ Backend key verified: $BACKEND_KEY"
     
     # Check if plan exists
     if [[ ! -f tfplan ]]; then
