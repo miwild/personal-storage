@@ -1,0 +1,105 @@
+---
+# RoleBinding for platform-nextcloud
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pi-agent-platform-nextcloud
+  namespace: platform-nextcloud
+subjects:
+- kind: ServiceAccount
+  name: pi-agent
+  namespace: agent-dev
+roleRef:
+  kind: Role
+  name: pi-agent-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+# RoleBinding for platform-observability
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pi-agent-platform-observability
+  namespace: platform-observability
+subjects:
+- kind: ServiceAccount
+  name: pi-agent
+  namespace: agent-dev
+roleRef:
+  kind: Role
+  name: pi-agent-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+# RoleBinding for platform-argocd
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pi-agent-platform-argocd
+  namespace: platform-argocd
+subjects:
+- kind: ServiceAccount
+  name: pi-agent
+  namespace: agent-dev
+roleRef:
+  kind: Role
+  name: pi-agent-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+# RoleBinding for platform-backstage
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pi-agent-platform-backstage
+  namespace: platform-backstage
+subjects:
+- kind: ServiceAccount
+  name: pi-agent
+  namespace: agent-dev
+roleRef:
+  kind: Role
+  name: pi-agent-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+# RoleBinding for platform-trivy
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pi-agent-platform-trivy
+  namespace: platform-trivy
+subjects:
+- kind: ServiceAccount
+  name: pi-agent
+  namespace: agent-dev
+roleRef:
+  kind: Role
+  name: pi-agent-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+# RoleBinding for platform-glitchtip
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pi-agent-platform-glitchtip
+  namespace: platform-glitchtip
+subjects:
+- kind: ServiceAccount
+  name: pi-agent
+  namespace: agent-dev
+roleRef:
+  kind: Role
+  name: pi-agent-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+# RoleBinding for shared-services
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pi-agent-shared-services
+  namespace: shared-services
+subjects:
+- kind: ServiceAccount
+  name: pi-agent
+  namespace: agent-dev
+roleRef:
+  kind: Role
+  name: pi-agent-deployer
+  apiGroup: rbac.authorization.k8s.io

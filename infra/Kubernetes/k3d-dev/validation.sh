@@ -13,12 +13,12 @@ else
 fi
 
 echo "2. Checking available namespaces..."
-NAMESPACES=$(kubectl get ns 2>/dev/null | grep -E "(agent-dev|portfolio|shared)" || echo "")
+NAMESPACES=$(kubectl get ns 2>/dev/null | grep -E "(agent-dev|platform)" || echo "")
 if [ -n "$NAMESPACES" ]; then
-  echo "✓ Portfolio namespaces found:"
+  echo "✓ Platform namespaces found:"
   echo "$NAMESPACES" | awk '{print "  - " $1}'
 else
-  echo "⚠ Portfolio namespaces not found (may not be created yet)"
+  echo "⚠ Platform namespaces not found (may not be created yet)"
 fi
 
 echo "3. Checking RBAC permissions..."
@@ -77,8 +77,8 @@ else
 fi
 
 echo "6. Checking portfolio namespace permissions..."
-for i in {1..6}; do
-  NAMESPACE="portfolio-app-$i"
+PLATFORM_NAMESPACES=("platform-nextcloud" "platform-observability" "platform-argocd" "platform-backstage" "platform-trivy" "platform-glitchtip")
+for NAMESPACE in "${PLATFORM_NAMESPACES[@]}"; do
   kubectl auth can-i get pods -n $NAMESPACE >/dev/null 2>&1
   if [ $? -eq 0 ]; then
     echo "✓ Can access $NAMESPACE"

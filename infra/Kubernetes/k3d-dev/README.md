@@ -14,7 +14,12 @@ This directory contains Kubernetes manifests specifically for the k3d developmen
 For the 6 portfolio applications, we use the following namespace strategy:
 
 - `agent-dev` - Coding agent operations (current namespace)
-- `portfolio-app-1` through `portfolio-app-6` - Individual namespaces for each application
+- `platform-nextcloud` - Nextcloud application
+- `platform-observability` - Observability stack (Grafana, Prometheus, Loki)
+- `platform-argocd` - ArgoCD continuous delivery
+- `platform-backstage` - Backstage developer portal
+- `platform-trivy` - Trivy security scanner
+- `platform-glitchtip` - GlitchTip error tracking
 - `shared-services` - Common services shared across applications
 
 ## RBAC Model
@@ -30,9 +35,9 @@ The coding agent uses a least-privilege model:
 We use explicit Traefik IngressRoute resources for routing:
 
 - Each application gets its own IngressRoute
-- Shared TLS configuration via LetsEncrypt certResolver
-- Nextcloud routing is preserved in the default namespace
-- Portfolio applications use `.local.example.com` domain pattern
+- Shared TLS configuration via wildcard certificate secrets
+- Each application uses path-based routing where appropriate
+- Applications use `.local.example.com` domain pattern for local development
 
 ## Validation
 
@@ -40,4 +45,4 @@ Run `./validation.sh` to check:
 - Namespace accessibility
 - RBAC permissions
 - Traefik capabilities
-- Portfolio namespace access
+- Platform namespace access
