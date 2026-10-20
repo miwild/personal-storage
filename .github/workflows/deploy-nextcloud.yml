@@ -175,12 +175,12 @@ jobs:
           helm repo add sealed-secrets https://bitnami.github.io/sealed-secrets
           helm repo update
 
-          helm dependency build ./infra/helm-charts
+          helm dependency build ./infra/Kubernetes/helm-charts
 
           # Install the umbrella chart so its Sealed Secrets controller is available.
           # Do not wait for Nextcloud yet; its database Secret is created next.
-          helm upgrade --install nextcloud ./infra/helm-charts \
-            -f ./infra/helm-charts/values.yaml \
+          helm upgrade --install nextcloud ./infra/Kubernetes/helm-charts \
+            -f ./infra/Kubernetes/helm-charts/values.yaml \
             --set nextcloud.externalDatabase.host="${{ inputs.rds_endpoint }}"
 
       - name: Create database SealedSecret
@@ -235,8 +235,8 @@ jobs:
             exit 1
           fi
 
-          helm upgrade --install nextcloud ./infra/helm-charts \
-            -f ./infra/helm-charts/values.yaml \
+          helm upgrade --install nextcloud ./infra/Kubernetes/helm-charts \
+            -f ./infra/Kubernetes/helm-charts/values.yaml \
             --set nextcloud.externalDatabase.host="$RDS_ENDPOINT" \
             --set-string nextcloud.nextcloud.username="$ADMIN_USER" \
             --set-string nextcloud.nextcloud.password="$ADMIN_PASSWORD"

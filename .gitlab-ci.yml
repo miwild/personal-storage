@@ -13,10 +13,10 @@ deploy-nextcloud:
     - helm repo add nextcloud https://nextcloud.github.io/helm
     - helm repo add sealed-secrets https://bitnami.github.io/sealed-secrets
     - helm repo update
-    - helm dependency build ./infra/helm-charts
-    - helm upgrade --install nextcloud ./infra/helm-charts -f ./infra/helm-charts/values.yaml
+    - helm dependency build ./infra/Kubernetes/helm-charts
+    - helm upgrade --install nextcloud ./infra/Kubernetes/helm-charts -f ./infra/Kubernetes/helm-charts/values.yaml
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"'
       changes:
-        - infra/helm-charts/**/*
+        - infra/Kubernetes/helm-charts/**/*
         - .gitlab-ci.yml
