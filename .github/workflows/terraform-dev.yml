@@ -1,0 +1,44 @@
+name: Terraform Dev
+
+on:
+  workflow_dispatch:
+  # Manual trigger only for dev environment
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nextcloud-dev-provisioning
+  cancel-in-progress: false
+
+jobs:
+  terraform-validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.16.6
+
+      - name: Terraform Init
+        run: |
+          find infra/dev -name '*.tf' -exec dirname {} \; | sort -u | while read -r dir; do
+            echo "Initializing $dir"
+            cd "$dir" && terraform init -backend=false && cd - >/dev/null
+          done
+
+      - name: Terraform Validate
+        run: |
+          find infra/dev -name '*.tf' -exec dirname {} \; | sort -u | while read -r dir; do
+            echo "Validating $dir"
+            cd "$dir" && terraform validate && cd - >/dev/null
+          done
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Test
+        run: |
+          cd infra/dev && terraform test

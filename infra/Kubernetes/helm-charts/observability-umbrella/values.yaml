@@ -1,0 +1,294 @@
+## -----------------------------------------------------------------------------
+## kube-prometheus-stack values for the shared / production environment
+## -----------------------------------------------------------------------------
+## Wrapper chart: infra/Kubernetes/helm-charts/observability-umbrella
+## Upstream chart: prometheus-community/kube-prometheus-stack 92.11.0
+## Release name:   observability-umbrella   (recommended - see README.md)
+## Namespace:      platform-observability   (created by
+##                 templates/namespaces/platform-namespaces.yaml, not here)
+##
+## All Prometheus/Alertmanager configuration (retention, storage, service
+## accounts) is intentionally included below to prevent silent loss via
+## duplicate YAML keys (which Helm resolves by last-wins semantics).
+## -----------------------------------------------------------------------------
+
+kube-prometheus-stack:
+
+  # Prometheus Operator: enabled, resources, AND serviceAccount — single block
+  prometheusOperator:
+    enabled: true
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    ## admissionWebhooks stay enabled (chart default).
+    serviceAccount:
+      create: true
+      name: ""
+
+  # Prometheus: enabled, service config, prometheusSpec, AND serviceAccount — single block
+  prometheus:
+    enabled: true
+    ingress:
+      enabled: false
+    service:
+      type: ClusterIP
+      port: 9090
+    prometheusSpec:
+      ## Keep 24h of history. Adjust retention period for production use.
+      retention: 24h
+      ## Single replica - production runs on a single-node k3s cluster.
+      replicas: 1
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 1Gi
+      ## Scrape interval / evaluation interval; keep defaults.
+      ruleSelectorNilUsesHelmValues: true
+      serviceMonitorSelectorNilUsesHelmValues: true
+      podMonitorSelectorNilUsesHelmValues: true
+      probeSelectorNilUsesHelmValues: true
+      ## Storage: 3Gi PVC on the default StorageClass "local-path"
+      ## (rancher local-path provisioner, RWO, dynamic).
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: local-path
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 3Gi
+      ## We use no additional scrape configurations and no remote write.
+      additionalScrapeConfigs: []
+      remoteWrite: []
+      ## External URL is left unset: Prometheus is reached through
+      ## the host-based IngressRoute or port-forward.
+    ## Use the dedicated service account created by the chart for RBAC.
+    serviceAccount:
+      create: true
+      name: ""
+
+  # Alertmanager: enabled, service config, alertmanagerSpec, config,
+  # AND serviceAccount — single block
+  alertmanager:
+    enabled: true
+    ingress:
+      enabled: false
+    service:
+      type: ClusterIP
+    alertmanagerSpec:
+      replicas: 1
+      retention: 24h
+      resources:
+        requests:
+          cpu: 25m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 256Mi
+      ## 1Gi is sufficient for alert state on a small cluster.
+      storage:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: local-path
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 1Gi
+    ## Alertmanager configuration (alertmanager.yaml content).
+    ## Uses a "null" receiver as the default — alerts are evaluated but not
+    ## routed to any notification channel.  See README.md for how to add
+    ## notification receivers (Slack, webhook, email, PagerDuty).
+    config:
+      global:
+        resolve_timeout: 5m
+      inhibit_rules:
+        - source_matchers:
+            - severity = critical
+          target_matchers:
+            - severity =~ warning|info
+          equal:
+            - namespace
+            - alertname
+        - source_matchers:
+            - severity = warning
+          target_matchers:
+            - severity = info
+          equal:
+            - namespace
+            - alertname
+        - source_matchers:
+            - alertname = InfoInhibitor
+          target_matchers:
+            - severity = info
+          equal:
+            - namespace
+        - target_matchers:
+            - alertname = InfoInhibitor
+      route:
+        group_by:
+          - namespace
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 12h
+        receiver: "null"
+        routes:
+          - matchers:
+              - alertname = "Watchdog"
+            receiver: "null"
+      receivers:
+        - name: "null"
+          # No notification integration configured.
+          # To add a notification channel, uncomment one of:
+          #
+          #   webhook_configs:
+          #     - url: "https://hooks.slack.com/services/..."
+          #       # Secure the URL as a GitHub secret and use --set string
+          #       # or a Kubernetes Secret.
+          #
+          #   email_configs:
+          #     - to: "alerts@example.com"
+          #       from: "noreply@example.com"
+          #       smarthost: "smtp.example.com:587"
+          #       auth_username: "alert@example.com"
+          #       auth_password: "SMTP_PASSWORD"   # must be a GitHub secret
+          #
+          #   slack_configs:
+          #     - api_url: "https://hooks.slack.com/services/..."
+          #       channel: "#ops-alerts"
+          #     # Store SLACK_BOT_TOKEN as a GitHub secret.
+          #
+          #   pagerduty_configs:
+          #     - service_key: "PAGERDUTY_SERVICE_KEY"  # GitHub secret
+          #
+          # After adding the integration, set the corresponding GitHub secret
+          # and include it in the Helm deploy step with --set or a values file.
+      templates:
+        - /etc/alertmanager/config/*.tmpl
+    ## Use the dedicated service account created by the chart for RBAC.
+    serviceAccount:
+      create: true
+      name: ""
+
+  # Grafana: enabled, service config, resources, serviceAccount, rbac — single block
+  grafana:
+    enabled: true
+    ingress:
+      enabled: false
+    service:
+      type: ClusterIP
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    ## The bundled Kubernetes dashboards are useful; keep them.
+    defaultDashboardsEnabled: true
+    ## No PVC: an emptyDir volume is sufficient; manually created dashboards
+    ## should be exported as JSON.
+    persistence:
+      enabled: false
+    ## The chart's `grafana-test` bats pod is only useful in CI.
+    testFramework:
+      enabled: false
+    ## Admin credentials are provisioned via SealedSecrets (see README.md).
+    ## The Secret name is "grafana-admin" in namespace "platform-observability"
+    ## with keys "admin-user" and "admin-password".
+    admin:
+      existingSecret: grafana-admin
+      userKey: admin-user
+      passwordKey: admin-password
+    ## Prometheus datasource is provisioned by the chart and points at the
+    ## in-cluster Prometheus service, see README.
+    additionalDataSources: []
+    ## Use the dedicated service account created by the chart
+    ## to ensure proper RBAC for sidecar containers.
+    serviceAccount:
+      create: true
+      name: ""
+    rbac:
+      create: true
+
+  # kubeStateMetrics: component enablement flag (parent chart only)
+  kubeStateMetrics:
+    enabled: true
+
+  # kube-state-metrics subchart: service, resources, AND serviceAccount — single block
+  kube-state-metrics:
+    service:
+      type: ClusterIP
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+    ## Create a dedicated service account for kube-state-metrics.
+    serviceAccount:
+      create: true
+      name: ""
+
+  # nodeExporter: component enablement flag
+  nodeExporter:
+    enabled: true
+
+  # prometheus-node-exporter subchart: service, hostNetwork, resources, AND serviceAccount — single block
+  prometheus-node-exporter:
+    service:
+      type: ClusterIP
+    ## hostNetwork is enabled by upstream default.
+    hostNetwork: true
+    resources:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+    ## Create a dedicated service account for node-exporter.
+    serviceAccount:
+      create: true
+      name: ""
+
+  # Windows Exporter and Thanos Ruler are left at their chart defaults (disabled).
+  windowsMonitoring:
+    enabled: false
+  thanosRuler:
+    enabled: false
+
+  ## ===========================================================================
+  ## k3s control plane scraping
+  ## ===========================================================================
+  ## k3s runs control plane components (etcd, scheduler, controller-manager,
+  ## kube-proxy) inside the k3s process and binds their metrics endpoints to
+  ## localhost only. These ServiceMonitors will show as DOWN targets since they
+  ## cannot reach the localhost-only endpoints. Disabling them prevents
+  ## permanent DOWN targets and associated alerts in k3s environments.
+  kubelet:
+    enabled: true
+  coreDns:
+    enabled: true
+  kubeEtcd:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+  kubeControllerManager:
+    enabled: false
+  kubeProxy:
+    enabled: false
+
+  ## ===========================================================================
+  ## Misc
+  ## ===========================================================================
+  ## Empty list of additional Kubernetes manifests to deploy with this chart.
+  ## Add custom resources here if needed.
+  extraObjects: []

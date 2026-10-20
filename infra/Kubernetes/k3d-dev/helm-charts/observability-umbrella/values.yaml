@@ -1,0 +1,247 @@
+## -----------------------------------------------------------------------------
+## kube-prometheus-stack values for the k3d-dev environment
+## -----------------------------------------------------------------------------
+## Wrapper chart: infra/Kubernetes/k3d-dev/helm-charts/observability-umbrella
+## Upstream chart: prometheus-community/kube-prometheus-stack 92.11.0
+## Release name:   kube-prometheus-stack   (see "Service names" in README.md)
+## Namespace:      platform-observability  (already defined in
+##                 templates/namespaces/platform-namespaces.yaml, not created here)
+##
+## Sizing goal: single disposable k3d cluster on a laptop. Requests/limits and
+## retention below are intentionally small; do not copy them to a shared or
+## production cluster.
+## -----------------------------------------------------------------------------
+
+kube-prometheus-stack:
+
+  ## ===========================================================================
+  ## Component selection
+  ## ===========================================================================
+  ## Prometheus Operator (also owns the Alertmanager/Prometheus/ServiceMonitor
+  ## CRDs through the bundled `crds` sub chart, crds.enabled=true by default).
+  ## The chart manages those CRDs, so no CRD manifests are added by hand
+  ## anywhere in k3d-dev.
+  prometheusOperator:
+    enabled: true
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    ## admissionWebhooks stay enabled (chart default): the validating webhooks
+    ## for PrometheusRule/ServiceMonitor need a certificate Job that talks to
+    ## the cluster DNS and the API server. That works out of the box in k3d.
+    serviceAccount:
+      create: true
+      name: ""
+
+  ## Component enablement
+  grafana:
+    enabled: true
+  nodeExporter:
+    enabled: true
+
+  ## Windows Exporter and Thanos Ruler are left at their chart defaults
+  ## (disabled) - a k3d Linux-only cluster does not need them.
+  windowsMonitoring:
+    enabled: false
+  thanosRuler:
+    enabled: false
+
+  ## ===========================================================================
+  ## No chart-managed ingress / no NodePort / no LoadBalancer
+  ## ===========================================================================
+  ## Local access is provided by the Traefik IngressRoutes in
+  ## templates/traefik/portfolio-ingress.yaml (host based routing inside the
+  ## platform-observability namespace) or by `kubectl port-forward`.
+  
+  # Prometheus service configuration
+  prometheus:
+    enabled: true
+    ingress:
+      enabled: false
+    ## Service object that the IngressRoute for prometheus.local.example.com
+    ## points at: <release>-prometheus, port 9090 (chart default ClusterIP).
+    service:
+      type: ClusterIP
+      port: 9090
+    prometheusSpec:
+      ## Keep 24h of history; a k3d cluster is recreated frequently.
+      retention: 24h
+      ## Single replica - no HA in the dev environment.
+      replicas: 1
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 1Gi
+      ## Scrape interval / evaluation interval, more comfortable intervals to
+      ## reduce dropped samples on minimal allocation.
+      ruleSelectorNilUsesHelmValues: true
+      serviceMonitorSelectorNilUsesHelmValues: true
+      podMonitorSelectorNilUsesHelmValues: true
+      probeSelectorNilUsesHelmValues: true
+      ## Storage: 3Gi PVC on the k3s/k3d default StorageClass "local-path"
+      ## (rancher local-path provisioner, RWO, dynamic). Delete the PVC (or the
+      ## whole release) to reset data; nothing needs to be backed up.
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: local-path
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 3Gi
+      ## We use no additional scrape configurations and no remote write.
+      additionalScrapeConfigs: []
+      remoteWrite: []
+      ## External URL is left unset: Prometheus is reached through the
+      ## host-based IngressRoute (prometheus.local.example.com).
+      ## Use the dedicated service account created by the chart for RBAC.
+      serviceAccountName: observability-umbrella-kub-prometheus
+
+  # Alertmanager service configuration
+  alertmanager:
+    enabled: true
+    ingress:
+      enabled: false
+    service:
+      type: ClusterIP
+    alertmanagerSpec:
+      replicas: 1
+      retention: 24h
+      resources:
+        requests:
+          cpu: 25m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 256Mi
+      ## 1Gi is enough for the alert state of a small cluster.
+      storage:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: local-path
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 1Gi
+      ## Chart default config has no receivers, i.e. alerts are evaluated but not
+      ## routed anywhere. Silence the "AlertmanagerFailedToSendAlerts" style noise
+      ## while no notification channel exists in this environment.
+      config:
+        receivers: []
+        routes:
+          receiver: ""
+      ## Use the dedicated service account created by the chart for RBAC.
+      serviceAccountName: observability-umbrella-kub-alertmanager
+
+  # Grafana service configuration
+  grafana:
+    ingress:
+      enabled: false
+    service:
+      type: ClusterIP
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    ## The bundled Kubernetes dashboards are useful even in dev, keep them.
+    defaultDashboardsEnabled: true
+    ## No PVC: an emptyDir volume is enough and a recreated pod costs nothing.
+    ## The dashboards we care about are provisioned from ConfigMaps, so only
+    ## manually created dashboards/plugins would be lost with the pod.
+    persistence:
+      enabled: false
+    ## The chart's `grafana-test` bats pod is only useful in CI.
+    ## Disable it to avoid an extra image pull in the dev cluster.
+    testFramework:
+      enabled: false
+    ## Admin credentials: `adminUser` stays "admin" and the password is
+    ## generated by the chart into Secret <release>-grafana (key admin-password).
+    ## To use fixed credentials instead create an empty Secret (README),
+    ## never a committed password:
+    ## existingSecret: grafana-admin
+    ## Prometheus datasource is provisioned by the chart and points at the
+    ## in-cluster Prometheus service, see README.
+    additionalDataSources: {}
+    ## Explicitly use the dedicated service account created by the chart
+    ## to ensure proper RBAC for sidecar containers.
+    serviceAccount:
+      create: true
+      name: ""
+    rbac:
+      create: true
+
+  # kube-state-metrics service configuration
+  kube-state-metrics:
+    enabled: true
+    service:
+      type: ClusterIP
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+    serviceAccount:
+      create: true
+      name: ""
+
+  # node-exporter service configuration
+  prometheus-node-exporter:
+    service:
+      type: ClusterIP
+    ## hostNetwork is enabled by upstream default. Set to false to silence
+    ## "Node exporter missing" alerts that node-exporter is unavailable.
+    hostNetwork: true
+    resources:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+    serviceAccount:
+      create: true
+      name: ""
+
+  ## ===========================================================================
+  ## k3s control plane scraping
+  ## ===========================================================================
+  ## k3s runs control plane components (etcd, scheduler, controller-manager,
+  ## kube-proxy) inside the k3s process and binds their metrics endpoints to
+  ## localhost only. The chart's ServiceMonitors expect these components to be
+  ## running as separate Pods with network-accessible metrics endpoints, as in
+  ## a standard kubeadm cluster. In k3s, these ServiceMonitors will always
+  ## show as DOWN targets since they cannot reach the localhost-only endpoints.
+  ##
+  ## Disabling these ServiceMonitors prevents permanent DOWN targets and
+  ## associated alerts in the local k3d development environment.
+  kubelet:
+    enabled: true
+  coreDns:
+    enabled: true
+  kubeEtcd:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+  kubeControllerManager:
+    enabled: false
+  kubeProxy:
+    enabled: false
+
+  ## ===========================================================================
+  ## Misc
+  ## ===========================================================================
+  ## Empty list of additional Kubernetes manifests to deploy with this chart.
+  ## Add custom resources here if needed.
+  extraObjects: []

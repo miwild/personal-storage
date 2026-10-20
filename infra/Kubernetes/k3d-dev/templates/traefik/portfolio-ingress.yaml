@@ -1,0 +1,118 @@
+---
+# IngressRoute for Nextcloud
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: platform-nextcloud-route
+  namespace: platform-nextcloud
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`nextcloud.local.example.com`) && PathPrefix(`/`)
+      kind: Rule
+      services:
+        - name: nextcloud
+          port: 8080
+  tls:
+    secretName: wildcard-cert-secret
+---
+# IngressRoute for Grafana, Prometheus and Loki
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: platform-observability-route
+  namespace: platform-observability
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`grafana.local.example.com`) && PathPrefix(`/`)
+      kind: Rule
+      services:
+        - name: kube-prometheus-stack-grafana
+          port: 80
+    - match: Host(`prometheus.local.example.com`) && PathPrefix(`/`)
+      kind: Rule
+      services:
+        - name: kube-prometheus-stack-prometheus
+          port: 9090
+    - match: Host(`loki.local.example.com`) && PathPrefix(`/`)
+      kind: Rule
+      services:
+        - name: loki
+          port: 3100
+  tls:
+    secretName: wildcard-cert-secret
+---
+# IngressRoute for Argo CD
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: platform-argocd-route
+  namespace: platform-argocd
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`argocd.local.example.com`) && PathPrefix(`/`)
+      kind: Rule
+      services:
+        - name: argocd-server
+          port: 8080
+  tls:
+    secretName: wildcard-cert-secret
+---
+# IngressRoute for Backstage
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: platform-backstage-route
+  namespace: platform-backstage
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`backstage.local.example.com`) && PathPrefix(`/`)
+      kind: Rule
+      services:
+        - name: backstage
+          port: 7007
+  tls:
+    secretName: wildcard-cert-secret
+---
+# IngressRoute for Trivy
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: platform-trivy-route
+  namespace: platform-trivy
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`trivy.local.example.com`) && PathPrefix(`/`)
+      kind: Rule
+      services:
+        - name: trivy
+          port: 4954
+  tls:
+    secretName: wildcard-cert-secret
+---
+# IngressRoute for GlitchTip
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: platform-glitchtip-route
+  namespace: platform-glitchtip
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`glitchtip.local.example.com`) && PathPrefix(`/`)
+      kind: Rule
+      services:
+        - name: glitchtip-web
+          port: 8000
+  tls:
+    secretName: wildcard-cert-secret

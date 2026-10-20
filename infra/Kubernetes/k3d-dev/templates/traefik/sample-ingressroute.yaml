@@ -1,0 +1,31 @@
+---
+# Sample IngressRoute template for portfolio applications
+# This should be customized for each application
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: portfolio-app-sample
+  namespace: portfolio-app-1
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`portfolio-app-1.example.com`)
+      kind: Rule
+      services:
+        - name: portfolio-app-service
+          port: 80
+  tls:
+    certResolver: letsencrypt
+---
+# Additional middleware example
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: portfolio-app-security-headers
+  namespace: portfolio-app-1
+spec:
+  headers:
+    frameDeny: true
+    sslRedirect: true
+    browserXssFilter: true

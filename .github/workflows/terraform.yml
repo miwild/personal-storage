@@ -99,7 +99,7 @@ jobs:
           fi
 
           RESPONSE=$(curl --silent --show-error --fail --get \
-            --data-urlencode "domains=nextcloud-demo-flourishing" \
+            --data-urlencode "domains=nextcloud-demo-flourishing,grafana-demo" \
             --data-urlencode "token=$DUCKDNS_TOKEN" \
             --data-urlencode "ip=$PUBLIC_IP" \
             https://www.duckdns.org/update)
@@ -111,15 +111,8 @@ jobs:
 
           echo "DuckDNS updated successfully to $PUBLIC_IP"
 
-  deploy-nextcloud:
-    needs: terraform-deploy
-    uses: ./.github/workflows/deploy-nextcloud.yml
-    with:
-      rds_endpoint: ${{ needs.terraform-deploy.outputs.rds_endpoint }}
-    secrets: inherit
-
   cleanup:
-    needs: [terraform-deploy, deploy-nextcloud]
+    needs: [terraform-deploy]
     if: always() && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
@@ -129,24 +122,6 @@ jobs:
       TF_VAR_duckdns_token: ${{ secrets.DUCKDNS_TOKEN }}
 
     steps:
-      - name: Mark cleanup as running
-        continue-on-error: true
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          DEMO_STATUS_KV_NAMESPACE_ID: ${{ secrets.DEMO_STATUS_KV_NAMESPACE_ID }}
-        run: |
-          set -euo pipefail
-
-          RESPONSE=$(curl --silent --show-error --fail-with-body \
-            --request PUT \
-            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            --header "Content-Type: application/octet-stream" \
-            --data-binary "running" \
-            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces/${DEMO_STATUS_KV_NAMESPACE_ID}/values/cleanupStatus?expiration_ttl=14400")
-
-          echo "$RESPONSE" | jq -e '.success == true' >/dev/null
-
       - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
@@ -180,6 +155,24 @@ jobs:
 
       - name: Wait two hours
         run: sleep 7200
+
+      - name: Mark cleanup as running
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DEMO_STATUS_KV_NAMESPACE_ID: ${{ secrets.DEMO_STATUS_KV_NAMESPACE_ID }}
+        run: |
+          set -euo pipefail
+
+          RESPONSE=$(curl --silent --show-error --fail-with-body \
+            --request PUT \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            --header "Content-Type: application/octet-stream" \
+            --data-binary "running" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces/${DEMO_STATUS_KV_NAMESPACE_ID}/values/cleanupStatus?expiration_ttl=14400")
+
+          echo "$RESPONSE" | jq -e '.success == true' >/dev/null
 
       - name: Destroy RDS
         run: |
