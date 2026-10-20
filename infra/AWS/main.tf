@@ -220,7 +220,7 @@ resource "aws_ec2_client_vpn_authorization_rule" "education" {
 # 3. Provision the Managed Virtual Machine
 resource "aws_instance" "k3s_server" {
   ami                         = data.aws_ami.ubuntu.id
-  instance_type               = "t3.small"
+  instance_type               = "t3.medium"
   key_name                    = aws_key_pair.mac_key.key_name
   associate_public_ip_address = true
   subnet_id                   = aws_subnet.education_public_a.id
@@ -297,7 +297,7 @@ resource "aws_instance" "k3s_server" {
 
         # 3. Now install and start K3s. It will read the file on its initial boot sequence automatically.
         echo "INSTALLING K3S"
-        sh /tmp/install-k3s.sh \
+        INSTALL_K3S_VERSION="${var.k3s_version}" sh /tmp/install-k3s.sh \
             --tls-san ${aws_eip.k3s_ip.public_ip}
 
         echo "=== CONFIGURING TRAEFIK LETS ENCRYPT ==="
@@ -399,4 +399,10 @@ variable "duckdns_token" {
   description = "DuckDNS token for DNS-01 ACME challenge"
   type        = string
   sensitive   = true
+}
+
+variable "k3s_version" {
+  description = "K3s release to install, e.g. v1.34.1+k3s1"
+  type        = string
+  default     = "v1.37.1+k3s1"
 }
