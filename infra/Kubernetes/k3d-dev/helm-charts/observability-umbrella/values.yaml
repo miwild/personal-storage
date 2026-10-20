@@ -33,15 +33,12 @@ kube-prometheus-stack:
     ## admissionWebhooks stay enabled (chart default): the validating webhooks
     ## for PrometheusRule/ServiceMonitor need a certificate Job that talks to
     ## the cluster DNS and the API server. That works out of the box in k3d.
+    serviceAccount:
+      create: true
+      name: ""
 
   ## Component enablement
-  prometheus:
-    enabled: true
-  alertmanager:
-    enabled: true
   grafana:
-    enabled: true
-  kubeStateMetrics:
     enabled: true
   nodeExporter:
     enabled: true
@@ -62,6 +59,7 @@ kube-prometheus-stack:
   
   # Prometheus service configuration
   prometheus:
+    enabled: true
     ingress:
       enabled: false
     ## Service object that the IngressRoute for prometheus.local.example.com
@@ -108,6 +106,7 @@ kube-prometheus-stack:
 
   # Alertmanager service configuration
   alertmanager:
+    enabled: true
     ingress:
       enabled: false
     service:
@@ -183,6 +182,7 @@ kube-prometheus-stack:
 
   # kube-state-metrics service configuration
   kube-state-metrics:
+    enabled: true
     service:
       type: ClusterIP
     resources:
@@ -192,6 +192,9 @@ kube-prometheus-stack:
       limits:
         cpu: 100m
         memory: 128Mi
+    serviceAccount:
+      create: true
+      name: ""
 
   # node-exporter service configuration
   prometheus-node-exporter:
@@ -207,6 +210,9 @@ kube-prometheus-stack:
       limits:
         cpu: 100m
         memory: 64Mi
+    serviceAccount:
+      create: true
+      name: ""
 
   ## ===========================================================================
   ## k3s control plane scraping
@@ -232,20 +238,6 @@ kube-prometheus-stack:
     enabled: false
   kubeProxy:
     enabled: false
-
-  ## Explicitly set service accounts for all components to avoid using pi-agent
-  prometheusOperator:
-    serviceAccount:
-      create: true
-      name: ""
-  kubeStateMetrics:
-    serviceAccount:
-      create: true
-      name: ""
-  prometheus-node-exporter:
-    serviceAccount:
-      create: true
-      name: ""
 
   ## ===========================================================================
   ## Misc
