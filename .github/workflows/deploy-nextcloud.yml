@@ -1,3 +1,4 @@
+
 name: Deploy Nextcloud
 
 on:
@@ -38,7 +39,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Do not deploy while scheduled or manual cleanup is running.
           if [ -z "$CLOUDFLARE_API_TOKEN" ] ||
              [ -z "$CLOUDFLARE_ACCOUNT_ID" ] ||
              [ -z "$DEMO_STATUS_KV_NAMESPACE_ID" ]; then
@@ -73,7 +73,6 @@ jobs:
               ;;
           esac
 
-          # Find the currently running K3s host.
           INSTANCE_INFO=$(aws ec2 describe-instances \
             --region ca-central-1 \
             --filters \
@@ -97,7 +96,6 @@ jobs:
 
           echo "Found K3s instance: $INSTANCE_ID"
 
-          # Wait up to 10 minutes for both AWS status checks to pass.
           INSTANCE_READY=false
 
           for i in $(seq 1 40); do
@@ -124,7 +122,6 @@ jobs:
             exit 1
           fi
 
-          # Check cleanup status again to reduce the chance of a race.
           HTTP_STATUS=$(curl --silent --show-error \
             --output "$STATUS_FILE" \
             --write-out '%{http_code}' \
@@ -160,11 +157,12 @@ jobs:
           fi
 
           echo "endpoint=$RDS_ENDPOINT" >> "$GITHUB_OUTPUT"
-          echo "RDS endpoint found."
+          echo "RDS endpoint found: $RDS_ENDPOINT"
 
       - name: Install kubeseal and OpenVPN
         run: |
           set -euo pipefail
+
           curl -fsSL "https://github.com/bitnami-labs/sealed-secrets/releases/download/v0.27.3/kubeseal-0.27.3-linux-amd64.tar.gz" \
             | sudo tar -xz -C /usr/local/bin kubeseal
 
@@ -310,19 +308,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          helm repo add nextcloud https://nextcloud.github.io/helm
           helm repo add sealed-secrets https://bitnami.github.io/sealed-secrets
           helm repo update
 
-          helm dependency build ./infra/Kubernetes/helm-charts
-
-          # Install the umbrella chart so its Sealed Secrets controller is available.
-          # Do not wait for Nextcloud yet; its database Secret is created next.
-          helm upgrade --install nextcloud ./infra/Kubernetes/helm-charts \
-            --namespace platform-nextcloud \
-            --create-namespace \
-            -f ./infra/Kubernetes/helm-charts/values.yaml \
-            --set nextcloud.externalDatabase.host="${{ steps.rds.outputs.endpoint }}"
+          helm upgrade --install sealed-secrets-controller \
+            sealed-secrets/sealed-secrets \
+            --namespace default \
+            --version 2.19.3 \
+            --set fullnameOverride=sealed-secrets-controller \
+            --set crd.keep=true \
+            --wait \
+            --timeout=180s
 
       - name: Create database SealedSecret
         env:
@@ -367,11 +363,12 @@ jobs:
           RDS_ENDPOINT: ${{ steps.rds.outputs.endpoint }}
           ADMIN_USER: ${{ secrets.ADMIN_USER }}
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          HELM_DRIVER: configmap
         run: |
           set -euo pipefail
 
-          if [ -z "$RDS_ENDPOINT" ]; then
-            echo "RDS_ENDPOINT is empty."
+          if [ -z "$RDS_ENDPOINT" ] || [ "$RDS_ENDPOINT" = "None" ]; then
+            echo "RDS_ENDPOINT is empty. Check the Get RDS endpoint step."
             exit 1
           fi
 
@@ -382,23 +379,28 @@ jobs:
 
           helm upgrade --install nextcloud ./infra/Kubernetes/helm-charts \
             --namespace platform-nextcloud \
+            --create-namespace \
+            --history-max 3 \
             -f ./infra/Kubernetes/helm-charts/values.yaml \
             --set nextcloud.externalDatabase.host="$RDS_ENDPOINT" \
             --set-string nextcloud.nextcloud.username="$ADMIN_USER" \
             --set-string nextcloud.nextcloud.password="$ADMIN_PASSWORD"
 
           echo "Waiting for Nextcloud deployment..."
-          kubectl rollout status deployment/nextcloud --timeout=300s
+          kubectl rollout status deployment/nextcloud \
+            -n platform-nextcloud --timeout=300s
 
       - name: Restart Nextcloud and install
         run: |
           set -euo pipefail
 
-          kubectl rollout restart deployment/nextcloud
-          kubectl rollout status deployment/nextcloud --timeout=180s
+          kubectl rollout restart deployment/nextcloud \
+            -n platform-nextcloud
+          kubectl rollout status deployment/nextcloud \
+            -n platform-nextcloud --timeout=180s
 
           echo "Checking current installation status..."
-          if ! STATUS=$(kubectl exec deployment/nextcloud -- php occ status 2>&1); then
+          if ! STATUS=$(kubectl exec -n platform-nextcloud deployment/nextcloud -- php occ status 2>&1); then
             echo "$STATUS"
             echo "Unable to check Nextcloud installation status."
             exit 1
@@ -411,7 +413,7 @@ jobs:
 
           echo "Installing Nextcloud..."
 
-          kubectl exec deployment/nextcloud -- sh -c '
+          kubectl exec -n platform-nextcloud deployment/nextcloud -- sh -c '
             php occ maintenance:install \
               --database=pgsql \
               --database-host="$POSTGRES_HOST" \
@@ -423,11 +425,12 @@ jobs:
           '
 
           echo "Verifying installation..."
-          kubectl exec deployment/nextcloud -- php occ status
+          kubectl exec -n platform-nextcloud deployment/nextcloud -- php occ status
 
       - name: Verify Nextcloud pod readiness
         run: |
           set -euo pipefail
           kubectl wait --for=condition=Ready pod \
+            -n platform-nextcloud \
             -l app.kubernetes.io/instance=nextcloud \
             --timeout=180s
