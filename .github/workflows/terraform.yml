@@ -308,3 +308,4 @@ jobs:
             "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces/${DEMO_STATUS_KV_NAMESPACE_ID}/values/cleanupStatus")
 
           echo "$RESPONSE" | jq -e '.success == true' >/dev/null
+

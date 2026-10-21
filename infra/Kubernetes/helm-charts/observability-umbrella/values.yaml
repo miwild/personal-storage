@@ -44,6 +44,9 @@ kube-prometheus-stack:
     grafana.ini:
       dashboards:
         default_home_dashboard_path: /tmp/dashboards/k8s-views-global.json
+      auth.anonymous:
+        enabled: true
+        org_role: Viewer
 
     persistence:
       enabled: false

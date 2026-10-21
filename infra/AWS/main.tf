@@ -269,6 +269,11 @@ resource "aws_eip" "k3s_ip" {
 resource "aws_instance" "k3s_server" {
   ami                         = data.aws_ami.ubuntu.id
   instance_type               = "t3.medium"
+  root_block_device {
+    volume_size           = 30
+    volume_type           = "gp3"
+    delete_on_termination = true
+  }
   key_name                    = aws_key_pair.mac_key.key_name
   associate_public_ip_address = true
   subnet_id                   = aws_subnet.education_public_a.id

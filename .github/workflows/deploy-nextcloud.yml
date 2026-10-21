@@ -2,60 +2,103 @@ name: Deploy Nextcloud
 
 on:
   workflow_dispatch:
-  workflow_call:
-    inputs:
-      rds_endpoint:
-        required: true
-        type: string
 
 permissions:
   contents: read
+
+concurrency:
+  group: nextcloud-demo-deployment
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ca-central-1
+  NAMESPACE: platform-nextcloud
+  CONTROLLER_NAMESPACE: default
+  HELM_RELEASE: nextcloud
+  CHART_PATH: ./infra/Kubernetes/helm-charts
+  NEXTCLOUD_HOST: nextcloud-demo-flourishing.duckdns.org
 
 jobs:
   deploy-nextcloud:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: azure/setup-kubectl@v4
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
         with:
           version: latest
 
-      - uses: azure/setup-helm@v4
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
         with:
-          version: v3.22.1
+          version: v4.2.4
 
-      - name: Diagnose Helm and Kubernetes
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify infrastructure and resolve endpoints
         run: |
           set -euo pipefail
 
           echo "=== Helm version ==="
           helm version
 
-          echo "=== Helm environment ==="
-          helm env
+          echo "=== Check RDS ==="
+          RDS_ENDPOINT=$(aws rds describe-db-instances \
+            --db-instance-identifier education \
+            --query 'DBInstances[0].Endpoint.Address' \
+            --output text)
 
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ca-central-1
+          if [ -z "$RDS_ENDPOINT" ] || [ "$RDS_ENDPOINT" = "None" ]; then
+            echo "RDS instance education is unavailable."
+            exit 1
+          fi
 
-      - name: Diagnose Helm chart size
-        run: |
-          set -euo pipefail
+          echo "RDS_ENDPOINT=$RDS_ENDPOINT" >> "$GITHUB_ENV"
+          echo "RDS endpoint resolved."
 
-          echo "=== Umbrella chart package size ==="
-          helm package ./infra/Kubernetes/helm-charts --destination /tmp
-          ls -lh /tmp/*.tgz
+          echo "=== Check running Kubernetes host ==="
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters \
+              "Name=tag:Name,Values=k3s-nextcloud-host" \
+              "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].InstanceId' \
+            --output text)
 
-          echo "=== Dependency archive sizes ==="
-          ls -lh infra/Kubernetes/helm-charts/charts/
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+            echo "No running k3s-nextcloud-host instance found."
+            exit 1
+          fi
+
+          echo "INSTANCE_ID=$INSTANCE_ID" >> "$GITHUB_ENV"
+          echo "Kubernetes host found."
+
+          echo "=== Check Client VPN ==="
+          ENDPOINT_ID=$(aws ec2 describe-client-vpn-endpoints \
+            --query "ClientVpnEndpoints[?Tags[?Key=='Name' && Value=='education-client-vpn']].ClientVpnEndpointId | [0]" \
+            --output text)
+
+          if [ -z "$ENDPOINT_ID" ] || [ "$ENDPOINT_ID" = "None" ]; then
+            echo "Client VPN endpoint education-client-vpn was not found."
+            exit 1
+          fi
+
+          echo "ENDPOINT_ID=$ENDPOINT_ID" >> "$GITHUB_ENV"
+          echo "Infrastructure checks passed."
 
       - name: Install kubeseal and OpenVPN
         run: |
-          curl -fsSL "https://github.com/bitnami-labs/sealed-secrets/releases/download/v0.27.3/kubeseal-0.27.3-linux-amd64.tar.gz" \
+          set -euo pipefail
+
+          curl -fsSL \
+            "https://github.com/bitnami-labs/sealed-secrets/releases/download/v0.27.3/kubeseal-0.27.3-linux-amd64.tar.gz" \
             | sudo tar -xz -C /usr/local/bin kubeseal
 
           sudo apt-get update
@@ -73,12 +116,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          ENDPOINT_ID=$(aws ec2 describe-client-vpn-endpoints \
-            --query "ClientVpnEndpoints[?Tags[?Key=='Name' && Value=='education-client-vpn']].ClientVpnEndpointId | [0]" \
-            --output text)
-
-          if [ -z "$ENDPOINT_ID" ] || [ "$ENDPOINT_ID" = "None" ]; then
-            echo "No Client VPN endpoint found. Is the stack up?"
+          if [ -z "$VPN_CLIENT_CERT" ] || [ -z "$VPN_CLIENT_KEY" ]; then
+            echo "VPN client certificate or key is missing."
             exit 1
           fi
 
@@ -87,40 +126,47 @@ jobs:
             --output text > client.ovpn
 
           {
-            echo "<cert>"
+            printf '\n<cert>\n'
             printf '%s\n' "$VPN_CLIENT_CERT"
-            echo "</cert>"
-            echo "<key>"
+            printf '</cert>\n'
+            printf '<key>\n'
             printf '%s\n' "$VPN_CLIENT_KEY"
-            echo "</key>"
+            printf '</key>\n'
           } >> client.ovpn
 
           chmod 600 client.ovpn
 
-          sudo openvpn --config client.ovpn --daemon --log /tmp/openvpn.log
+          sudo openvpn \
+            --config client.ovpn \
+            --daemon \
+            --log /tmp/openvpn.log
 
           for i in $(seq 1 120); do
-            ip addr show tun0 >/dev/null 2>&1 && break
+            if ip addr show tun0 >/dev/null 2>&1; then
+              break
+            fi
             sleep 5
           done
 
-          ip addr show tun0 || {
+          if ! ip addr show tun0 >/dev/null 2>&1; then
+            echo "Client VPN connection failed."
             cat /tmp/openvpn.log
             exit 1
-          }
+          fi
+
+          echo "Client VPN connected."
 
       - name: Configure Kubernetes through SSM
         run: |
           set -euo pipefail
 
-          read -r INSTANCE_ID IP < <(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=k3s-nextcloud-host" \
-                      "Name=instance-state-name,Values=running" \
-            --query "Reservations[0].Instances[0].[InstanceId,PrivateIpAddress]" \
+          IP=$(aws ec2 describe-instances \
+            --instance-ids "$INSTANCE_ID" \
+            --query 'Reservations[0].Instances[0].PrivateIpAddress' \
             --output text)
 
-          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
-            echo "No running k3s instance found."
+          if [ -z "$IP" ] || [ "$IP" = "None" ]; then
+            echo "Unable to resolve the Kubernetes host private IP."
             exit 1
           fi
 
@@ -138,13 +184,15 @@ jobs:
               }
 
             if aws ssm wait command-executed \
-                 --command-id "$COMMAND_ID" \
-                 --instance-id "$INSTANCE_ID"; then
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE_ID"; then
+
               aws ssm get-command-invocation \
                 --command-id "$COMMAND_ID" \
                 --instance-id "$INSTANCE_ID" \
                 --query 'StandardOutputContent' \
                 --output text > "$HOME/.kube/config"
+
               break
             fi
 
@@ -152,46 +200,61 @@ jobs:
           done
 
           if [ ! -s "$HOME/.kube/config" ]; then
-            echo "K3s did not become ready."
+            echo "K3s did not become ready or kubeconfig could not be retrieved."
             exit 1
           fi
 
           chmod 600 "$HOME/.kube/config"
-          sed -i "s/127.0.0.1/$IP/" "$HOME/.kube/config"
+
+          sed -i "s/127.0.0.1/$IP/g" "$HOME/.kube/config"
+
+          echo "=== Kubernetes nodes ==="
           kubectl get nodes
 
-      - name: Pre-stage static acme.json on Host
+          echo "=== Kubernetes namespaces ==="
+          kubectl get namespaces
+
+      - name: Pre-stage ACME certificate storage
         env:
           ACME_JSON: ${{ secrets.ACME_JSON }}
         run: |
           set -euo pipefail
 
           if [ -z "$ACME_JSON" ]; then
-            echo "ACME_JSON secret is empty or not set. Traefik will request a new certificate."
+            echo "ACME_JSON is not set; skipping certificate storage pre-stage."
             exit 0
           fi
 
-          read -r INSTANCE_ID < <(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=k3s-nextcloud-host" \
-                      "Name=instance-state-name,Values=running" \
-            --query "Reservations[0].Instances[0].InstanceId" \
-            --output text)
+          ENCODED_ACME=$(printf '%s' "$ACME_JSON" | base64 -w 0)
 
-          # Escaping single quotes safely for SSM execution
-          ENCODED_ACME=$(echo "$ACME_JSON" | base64 -w 0)
-
-          aws ssm send-command \
+          COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
             --parameters "{\"commands\":[
               \"mkdir -p /var/lib/rancher/k3s/storage/traefik-acme\",
-              \"echo '$ENCODED_ACME' | base64 -d > /var/lib/rancher/k3s/storage/traefik-acme/acme.json\",
+              \"printf '%s' '$ENCODED_ACME' | base64 -d > /var/lib/rancher/k3s/storage/traefik-acme/acme.json\",
               \"chmod 600 /var/lib/rancher/k3s/storage/traefik-acme/acme.json\"
-            ]}"
+            ]}" \
+            --query 'Command.CommandId' \
+            --output text)
 
-          echo "Pre-staged acme.json successfully."
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID"
 
-      - name: Install Sealed Secrets controller
+          echo "ACME certificate storage staged."
+
+      - name: Prepare namespaces
+        run: |
+          set -euo pipefail
+
+          kubectl apply \
+            -f infra/Kubernetes/templates/namespaces/platform-namespaces.yaml
+
+          kubectl get namespace "$NAMESPACE"
+          kubectl get namespace "$CONTROLLER_NAMESPACE"
+
+      - name: Separate Sealed Secrets from the Nextcloud chart
         run: |
           set -euo pipefail
 
@@ -199,48 +262,53 @@ jobs:
           helm repo add sealed-secrets https://bitnami.github.io/sealed-secrets
           helm repo update
 
-          helm dependency build ./infra/Kubernetes/helm-charts
+          # Install the controller as its own release in default.
+          helm upgrade --install sealed-secrets-controller \
+            sealed-secrets/sealed-secrets \
+            --namespace "$CONTROLLER_NAMESPACE" \
+            --version 2.19.3 \
+            --set fullnameOverride=sealed-secrets-controller \
+            --set crd.create=true \
+            --set crd.keep=true \
+            --wait \
+            --timeout 180s
 
-          echo "=== Chart package sizes ==="
-          du -sh infra/Kubernetes/helm-charts/charts/*
+          kubectl rollout status \
+            deployment/sealed-secrets-controller \
+            --namespace "$CONTROLLER_NAMESPACE" \
+            --timeout=180s
 
-          echo "=== Rendered manifest size ==="
-          helm template nextcloud ./infra/Kubernetes/helm-charts \
-            -f ./infra/Kubernetes/helm-charts/values.yaml \
-            --set nextcloud.externalDatabase.host="${{ inputs.rds_endpoint }}" \
-            > /tmp/nextcloud-rendered.yaml
+          # Create a temporary copy of the umbrella chart that contains
+          # only the Nextcloud dependency. This avoids installing a
+          # second controller in platform-nextcloud.
+          CHART_DIR="$RUNNER_TEMP/nextcloud-chart"
 
-          wc -c /tmp/nextcloud-rendered.yaml
+          rm -rf "$CHART_DIR"
+          mkdir -p "$CHART_DIR"
 
-          echo "=== Installing umbrella chart ==="
-          if helm upgrade --install nextcloud ./infra/Kubernetes/helm-charts \
-            -f ./infra/Kubernetes/helm-charts/values.yaml \
-            --set nextcloud.externalDatabase.host="${{ inputs.rds_endpoint }}"; then
-            echo "Helm installation command succeeded."
-          else
-            echo "ERROR: Helm installation failed. Collecting diagnostics..."
+          cp -R "$CHART_PATH/." "$CHART_DIR/"
 
-            echo "=== Helm releases ==="
-            helm list --all-namespaces || true
+          # Remove the sealed-secrets dependency from the temporary
+          # Chart.yaml; leave the repository copy unchanged.
+          sed -i \
+            '/  - name: sealed-secrets/,/repository: "https:\/\/bitnami.github.io\/sealed-secrets"/d' \
+            "$CHART_DIR/Chart.yaml"
 
-            echo "=== Helm release history ==="
-            helm history nextcloud -n default || true
+          # Rebuild dependencies from the modified Chart.yaml.
+          rm -f "$CHART_DIR"/charts/*.tgz
+          rm -f "$CHART_DIR/Chart.lock"
 
-            echo "=== Helm release Secret metadata ==="
-            kubectl get secrets -n default \
-              -l owner=helm,name=nextcloud \
-              -o custom-columns='NAME:.metadata.name,STATUS:.metadata.labels.status,VERSION:.metadata.labels.version' \
-              || true
+          helm dependency update "$CHART_DIR"
 
-            echo "=== Recent Kubernetes events ==="
-            kubectl get events -A \
-              --sort-by='.metadata.creationTimestamp' | tail -n 80 || true
+          echo "=== Prepared chart dependencies ==="
+          ls -lh "$CHART_DIR/charts"
 
-            echo "=== Recent pod status ==="
-            kubectl get pods -A -o wide || true
-
+          if ls "$CHART_DIR"/charts/sealed-secrets-*.tgz >/dev/null 2>&1; then
+            echo "Unexpected Sealed Secrets chart dependency remains."
             exit 1
           fi
+
+          echo "CHART_DIR=$CHART_DIR" >> "$GITHUB_ENV"
 
       - name: Create database SealedSecret
         env:
@@ -250,97 +318,202 @@ jobs:
           set -euo pipefail
 
           if [ -z "$DB_USERNAME" ] || [ -z "$DB_PASSWORD" ]; then
-            echo "DB_USERNAME or DB_PASSWORD GitHub secret is empty."
+            echo "DB_USERNAME or DB_PASSWORD GitHub secret is missing."
             exit 1
           fi
 
-          kubectl rollout status deployment/sealed-secrets-controller \
-            -n default --timeout=180s
-
           kubectl create secret generic db-secrets \
-            --namespace default \
+            --namespace "$NAMESPACE" \
             --from-literal=DB_USERNAME="$DB_USERNAME" \
             --from-literal=DB_PASSWORD="$DB_PASSWORD" \
-            --dry-run=client -o yaml \
-            | kubeseal --controller-namespace default --format yaml \
+            --dry-run=client \
+            -o yaml \
+            | kubeseal \
+                --controller-namespace "$CONTROLLER_NAMESPACE" \
+                --controller-name sealed-secrets-controller \
+                --format yaml \
             | kubectl apply -f -
 
-          # Wait for Sealed Secrets to create the ordinary Kubernetes Secret.
-          for i in $(seq 1 30); do
-            if kubectl get secret db-secrets -n default \
+          # Wait for the controller to unseal the Secret in the
+          # target application namespace.
+          for i in $(seq 1 60); do
+            if kubectl get secret db-secrets \
+                --namespace "$NAMESPACE" \
                 -o jsonpath='{.data.DB_USERNAME}' 2>/dev/null | grep -q . \
-              && kubectl get secret db-secrets -n default \
+              && kubectl get secret db-secrets \
+                --namespace "$NAMESPACE" \
                 -o jsonpath='{.data.DB_PASSWORD}' 2>/dev/null | grep -q .; then
-              echo "Database Secret is available."
+              echo "Database Secret is available in $NAMESPACE."
               exit 0
             fi
+
             sleep 2
           done
 
-          echo "db-secrets was not created correctly by the Sealed Secrets controller."
-          kubectl get sealedsecrets -n default
+          echo "The database Secret was not created."
+          kubectl get sealedsecrets --namespace "$NAMESPACE" || true
+          kubectl get events --namespace "$NAMESPACE" \
+            --sort-by='.metadata.creationTimestamp' | tail -n 40 || true
           exit 1
 
-      - name: Deploy and install Nextcloud
+      - name: Deploy Nextcloud
         env:
-          RDS_ENDPOINT: ${{ inputs.rds_endpoint }}
           ADMIN_USER: ${{ secrets.ADMIN_USER }}
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
         run: |
           set -euo pipefail
 
           if [ -z "$ADMIN_USER" ] || [ -z "$ADMIN_PASSWORD" ]; then
-            echo "ADMIN_USER or ADMIN_PASSWORD GitHub secret is empty."
+            echo "ADMIN_USER or ADMIN_PASSWORD GitHub secret is missing."
             exit 1
           fi
 
-          helm upgrade --install nextcloud ./infra/Kubernetes/helm-charts \
-            -f ./infra/Kubernetes/helm-charts/values.yaml \
+          echo "=== Deploy Nextcloud into $NAMESPACE ==="
+
+          helm template "$HELM_RELEASE" "$CHART_DIR" \
+            --namespace "$NAMESPACE" \
+            -f "$CHART_PATH/values.yaml" \
             --set nextcloud.externalDatabase.host="$RDS_ENDPOINT" \
             --set-string nextcloud.nextcloud.username="$ADMIN_USER" \
-            --set-string nextcloud.nextcloud.password="$ADMIN_PASSWORD"
+            --set-string nextcloud.nextcloud.password="$ADMIN_PASSWORD" \
+            > "$RUNNER_TEMP/nextcloud-rendered.yaml"
 
-          echo "Waiting for Nextcloud deployment..."
-          kubectl rollout status deployment/nextcloud --timeout=300s
+          echo "Rendered manifest size:"
+          wc -c "$RUNNER_TEMP/nextcloud-rendered.yaml"
 
-      - name: Restart Nextcloud and install
+          helm upgrade --install "$HELM_RELEASE" "$CHART_DIR" \
+            --namespace "$NAMESPACE" \
+            --create-namespace \
+            -f "$CHART_PATH/values.yaml" \
+            --set nextcloud.externalDatabase.host="$RDS_ENDPOINT" \
+            --set-string nextcloud.nextcloud.username="$ADMIN_USER" \
+            --set-string nextcloud.nextcloud.password="$ADMIN_PASSWORD" \
+            --wait \
+            --timeout 10m
+
+          echo "=== Verify deployment ==="
+          kubectl rollout status deployment/nextcloud \
+            --namespace "$NAMESPACE" \
+            --timeout=300s
+
+          kubectl get pods,services,pvc \
+            --namespace "$NAMESPACE" \
+            -o wide
+
+      - name: Verify or install Nextcloud
         run: |
           set -euo pipefail
 
-          kubectl rollout restart deployment/nextcloud
-          kubectl rollout status deployment/nextcloud --timeout=180s
+          echo "=== Check Nextcloud installation ==="
 
-          echo "Checking current installation status..."
-          if ! STATUS=$(kubectl exec deployment/nextcloud -- php occ status 2>&1); then
+          if STATUS=$(kubectl exec \
+            --namespace "$NAMESPACE" \
+            deployment/nextcloud \
+            -- php occ status 2>&1); then
+
             echo "$STATUS"
-            echo "Unable to check Nextcloud installation status."
+
+            if echo "$STATUS" | grep -q 'installed: true'; then
+              echo "Nextcloud is already installed."
+              exit 0
+            fi
+          else
+            echo "$STATUS"
+            echo "Could not check Nextcloud status."
             exit 1
           fi
 
-          if echo "$STATUS" | grep -q 'installed: true'; then
-            echo "Nextcloud is already installed."
-            exit 0
-          fi
+          echo "=== Install Nextcloud ==="
 
-          echo "Installing Nextcloud..."
+          kubectl exec \
+            --namespace "$NAMESPACE" \
+            deployment/nextcloud \
+            -- sh -c '
+              php occ maintenance:install \
+                --database=pgsql \
+                --database-host="$POSTGRES_HOST" \
+                --database-name="$POSTGRES_DB" \
+                --database-user="$POSTGRES_USER" \
+                --database-pass="$POSTGRES_PASSWORD" \
+                --admin-user="$NEXTCLOUD_ADMIN_USER" \
+                --admin-pass="$NEXTCLOUD_ADMIN_PASSWORD"
+            '
 
-          kubectl exec deployment/nextcloud -- sh -c '
-            php occ maintenance:install \
-              --database=pgsql \
-              --database-host="$POSTGRES_HOST" \
-              --database-name="$POSTGRES_DB" \
-              --database-user="$POSTGRES_USER" \
-              --database-pass="$POSTGRES_PASSWORD" \
-              --admin-user="$NEXTCLOUD_ADMIN_USER" \
-              --admin-pass="$NEXTCLOUD_ADMIN_PASSWORD"
-          '
+          kubectl exec \
+            --namespace "$NAMESPACE" \
+            deployment/nextcloud \
+            -- php occ status
 
-          echo "Verifying installation..."
-          kubectl exec deployment/nextcloud -- php occ status
-
-      - name: Verify Nextcloud pod readiness
+      - name: Set login page message and link
         run: |
           set -euo pipefail
-          kubectl wait --for=condition=Ready pod \
-            -l app.kubernetes.io/instance=nextcloud \
-            --timeout=180s
+
+          kubectl exec \
+            --namespace "$NAMESPACE" \
+            deployment/nextcloud \
+            -- php occ theming:config name \
+              "Click here for the Demo login credentials"
+
+          kubectl exec \
+            --namespace "$NAMESPACE" \
+            deployment/nextcloud \
+            -- php occ theming:config url \
+              "https://github.com/miwild/platform-engineering#demo-credentials"
+
+          kubectl exec \
+            --namespace "$NAMESPACE" \
+            deployment/nextcloud \
+            -- php occ theming:config slogan ""
+
+      - name: Apply Nextcloud ingress route
+        run: |
+          set -euo pipefail
+
+          echo "=== Check Traefik CRD ==="
+
+          if ! kubectl get crd ingressroutes.traefik.io >/dev/null 2>&1; then
+            echo "Traefik IngressRoute CRD is missing."
+            exit 1
+          fi
+
+          echo "=== Apply configured IngressRoutes ==="
+
+          kubectl apply \
+            -f infra/Kubernetes/templates/traefik/ingress.yaml
+
+          echo "=== Verify Nextcloud Service ==="
+
+          kubectl get service nextcloud \
+            --namespace "$NAMESPACE"
+
+          echo "=== Verify Nextcloud route ==="
+
+          kubectl get ingressroute nextcloud-secure \
+            --namespace "$NAMESPACE" \
+            -o yaml
+
+      - name: Final verification
+        run: |
+          set -euo pipefail
+
+          echo "=== Pods ==="
+          kubectl get pods --namespace "$NAMESPACE" -o wide
+
+          echo "=== Services ==="
+          kubectl get services --namespace "$NAMESPACE"
+
+          echo "=== PVCs ==="
+          kubectl get pvc --namespace "$NAMESPACE"
+
+          echo "=== Nextcloud application status ==="
+          kubectl exec \
+            --namespace "$NAMESPACE" \
+            deployment/nextcloud \
+            -- php occ status
+
+          echo "=== IngressRoute ==="
+          kubectl get ingressroute nextcloud-secure \
+            --namespace "$NAMESPACE"
+
+          echo "Deployment checks passed."
+          echo "Nextcloud URL: https://$NEXTCLOUD_HOST"

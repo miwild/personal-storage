@@ -297,6 +297,29 @@ jobs:
 
           kubectl get secret grafana-admin -n "$NAMESPACE"
 
+      - name: Provision Grafana Global dashboard
+        run: |
+          set -euo pipefail
+
+          DASHBOARD_URL=https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-views-global.json
+          DASHBOARD_FILE="$RUNNER_TEMP/k8s-views-global.json"
+
+          curl -fsSL --retry 3 --retry-delay 5 "$DASHBOARD_URL" -o "$DASHBOARD_FILE"
+
+          # Fail early if the download isn't a valid dashboard
+          jq -e '.title' "$DASHBOARD_FILE" >/dev/null
+          echo "Downloaded: $(jq -r '.title' "$DASHBOARD_FILE") ($(wc -c < "$DASHBOARD_FILE") bytes)"
+
+          kubectl create configmap grafana-dashboard-k8s-views-global \
+            --namespace "$NAMESPACE" \
+            --from-file=k8s-views-global.json="$DASHBOARD_FILE" \
+            --dry-run=client -o yaml \
+            | kubectl label --local -f - grafana_dashboard=1 -o yaml \
+            | kubectl apply --server-side --force-conflicts -f -
+
+          kubectl get configmap grafana-dashboard-k8s-views-global \
+            --namespace "$NAMESPACE"
+
       - name: Build chart dependencies and validate
         run: |
           set -euo pipefail
