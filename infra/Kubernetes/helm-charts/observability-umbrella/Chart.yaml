@@ -1,20 +1,27 @@
 apiVersion: v2
 name: observability-umbrella
-description: Shared wrapper chart for the upstream kube-prometheus-stack (Grafana, Prometheus, Alertmanager)
+description: k3d-dev wrapper chart for the upstream kube-prometheus-stack (Grafana, Prometheus, Alertmanager)
 type: application
 version: 0.1.0
+# appVersion records the version of the wrapped upstream chart, so the pinned
+# chart version is visible without reading Chart.lock.
 appVersion: "92.11.0"
 
 # Chart-wide assumptions for this environment:
 #   * Upstream chart: prometheus-community/kube-prometheus-stack, pinned below.
-#   * Namespace: platform-observability (created by
-#     templates/namespaces/platform-namespaces.yaml, which is admin-owned;
-#     this chart does not create namespaces).
-#   * Intended Kubernetes version: k3s (the production cluster also runs k3s,
-#     so k3s-specific ServiceMonitor tuning applies here too).
-
+#   * Namespace: platform-observability (created by templates/namespaces/platform-namespaces.yaml,
+#     which is admin owned - this chart does not create namespaces).
+#   * Intended Kubernetes version: k3s v1.35.x used by the k3d-dev cluster.
+#     The upstream chart requires kubeVersion ">=1.25.0-0".
 dependencies:
   - name: kube-prometheus-stack
     alias: kube-prometheus-stack
     version: 92.11.0
     repository: "https://prometheus-community.github.io/helm-charts"
+
+  - name: loki
+    version: 19.0.2
+    repository: https://grafana-community.github.io/helm-charts
+  - name: alloy
+    version: 1.14.0
+    repository: https://grafana.github.io/helm-charts
