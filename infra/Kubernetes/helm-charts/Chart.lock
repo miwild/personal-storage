@@ -2,5 +2,8 @@ dependencies:
 - name: nextcloud
   repository: https://nextcloud.github.io/helm
   version: 9.2.6
-digest: sha256:735a6fbe01e16af93a8bc2afe29149701cbfdf4cbea81cf8188b2078454fe06b
-generated: "2026-10-21T14:59:12.520898-03:00"
+- name: sealed-secrets
+  repository: https://bitnami.github.io/sealed-secrets
+  version: 2.19.3
+digest: sha256:214eccf5037b500cede028b2be9b2e5451c5b1f23fd6310f2d5bef2f44df3dcf
+generated: "2026-08-20T17:45:48.138356-07:00"

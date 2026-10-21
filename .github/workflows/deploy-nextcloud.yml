@@ -1,16 +1,15 @@
-
 name: Deploy Nextcloud
 
 on:
-  workflow_call:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      rds_endpoint:
+        required: true
+        type: string
 
 permissions:
   contents: read
-
-concurrency:
-  group: nextcloud-app-deploy
-  cancel-in-progress: false
 
 jobs:
   deploy-nextcloud:
@@ -24,6 +23,18 @@ jobs:
           version: latest
 
       - uses: azure/setup-helm@v4
+        with:
+          version: v3.22.1
+
+      - name: Diagnose Helm and Kubernetes
+        run: |
+          set -euo pipefail
+
+          echo "=== Helm version ==="
+          helm version
+
+          echo "=== Helm environment ==="
+          helm env
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -31,138 +42,19 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ca-central-1
 
-      - name: Verify infrastructure readiness
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          DEMO_STATUS_KV_NAMESPACE_ID: ${{ secrets.DEMO_STATUS_KV_NAMESPACE_ID }}
+      - name: Diagnose Helm chart size
         run: |
           set -euo pipefail
 
-          if [ -z "$CLOUDFLARE_API_TOKEN" ] ||
-             [ -z "$CLOUDFLARE_ACCOUNT_ID" ] ||
-             [ -z "$DEMO_STATUS_KV_NAMESPACE_ID" ]; then
-            echo "Cloudflare KV credentials or namespace configuration are missing."
-            exit 1
-          fi
+          echo "=== Umbrella chart package size ==="
+          helm package ./infra/Kubernetes/helm-charts --destination /tmp
+          ls -lh /tmp/*.tgz
 
-          STATUS_FILE=$(mktemp)
-          trap 'rm -f "$STATUS_FILE"' EXIT
-
-          HTTP_STATUS=$(curl --silent --show-error \
-            --output "$STATUS_FILE" \
-            --write-out '%{http_code}' \
-            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces/${DEMO_STATUS_KV_NAMESPACE_ID}/values/cleanupStatus")
-
-          case "$HTTP_STATUS" in
-            200)
-              CLEANUP_STATUS=$(cat "$STATUS_FILE")
-              if [ "$CLEANUP_STATUS" = "running" ]; then
-                echo "Infrastructure is not ready: cleanup is currently running."
-                exit 1
-              fi
-              ;;
-            404)
-              echo "No active cleanup status found."
-              ;;
-            *)
-              echo "Could not verify cleanup status (HTTP $HTTP_STATUS)."
-              cat "$STATUS_FILE"
-              exit 1
-              ;;
-          esac
-
-          INSTANCE_INFO=$(aws ec2 describe-instances \
-            --region ca-central-1 \
-            --filters \
-              "Name=tag:Name,Values=k3s-nextcloud-host" \
-              "Name=instance-state-name,Values=running" \
-            --query 'Reservations[].Instances[].[InstanceId,PrivateIpAddress]' \
-            --output text)
-
-          if [ -z "$INSTANCE_INFO" ] || [ "$INSTANCE_INFO" = "None" ]; then
-            echo "Infrastructure is not ready: no running K3s instance found."
-            exit 1
-          fi
-
-          read -r INSTANCE_ID PRIVATE_IP <<< "$INSTANCE_INFO"
-
-          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ] ||
-             [ -z "$PRIVATE_IP" ] || [ "$PRIVATE_IP" = "None" ]; then
-            echo "Could not determine the running K3s instance details."
-            exit 1
-          fi
-
-          echo "Found K3s instance: $INSTANCE_ID"
-
-          INSTANCE_READY=false
-
-          for i in $(seq 1 40); do
-            STATUS=$(aws ec2 describe-instance-status \
-              --region ca-central-1 \
-              --instance-ids "$INSTANCE_ID" \
-              --query 'InstanceStatuses[0].[InstanceStatus.Status,SystemStatus.Status]' \
-              --output text)
-
-            read -r INSTANCE_STATUS SYSTEM_STATUS <<< "$STATUS"
-
-            if [ "$INSTANCE_STATUS" = "ok" ] &&
-               [ "$SYSTEM_STATUS" = "ok" ]; then
-              INSTANCE_READY=true
-              break
-            fi
-
-            echo "Waiting for EC2 status checks ($i/40): instance=${INSTANCE_STATUS:-unknown}, system=${SYSTEM_STATUS:-unknown}"
-            sleep 15
-          done
-
-          if [ "$INSTANCE_READY" != true ]; then
-            echo "Infrastructure is not ready: EC2 status checks did not pass."
-            exit 1
-          fi
-
-          HTTP_STATUS=$(curl --silent --show-error \
-            --output "$STATUS_FILE" \
-            --write-out '%{http_code}' \
-            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces/${DEMO_STATUS_KV_NAMESPACE_ID}/values/cleanupStatus")
-
-          if [ "$HTTP_STATUS" = "200" ] &&
-             [ "$(cat "$STATUS_FILE")" = "running" ]; then
-            echo "Infrastructure is not ready: cleanup started during the readiness check."
-            exit 1
-          elif [ "$HTTP_STATUS" != "200" ] &&
-               [ "$HTTP_STATUS" != "404" ]; then
-            echo "Could not recheck cleanup status (HTTP $HTTP_STATUS)."
-            cat "$STATUS_FILE"
-            exit 1
-          fi
-
-          echo "Infrastructure readiness checks passed."
-
-      - name: Get RDS endpoint
-        id: rds
-        run: |
-          set -euo pipefail
-
-          RDS_ENDPOINT=$(aws rds describe-db-instances \
-            --region ca-central-1 \
-            --query "DBInstances[?DBInstanceIdentifier=='education'].Endpoint.Address | [0]" \
-            --output text)
-
-          if [ -z "$RDS_ENDPOINT" ] || [ "$RDS_ENDPOINT" = "None" ]; then
-            echo "RDS endpoint not found for database instance 'education'. Is the database running?"
-            exit 1
-          fi
-
-          echo "endpoint=$RDS_ENDPOINT" >> "$GITHUB_OUTPUT"
-          echo "RDS endpoint found: $RDS_ENDPOINT"
+          echo "=== Dependency archive sizes ==="
+          ls -lh infra/Kubernetes/helm-charts/charts/
 
       - name: Install kubeseal and OpenVPN
         run: |
-          set -euo pipefail
-
           curl -fsSL "https://github.com/bitnami-labs/sealed-secrets/releases/download/v0.27.3/kubeseal-0.27.3-linux-amd64.tar.gz" \
             | sudo tar -xz -C /usr/local/bin kubeseal
 
@@ -190,11 +82,6 @@ jobs:
             exit 1
           fi
 
-          if [ -z "$VPN_CLIENT_CERT" ] || [ -z "$VPN_CLIENT_KEY" ]; then
-            echo "VPN_CLIENT_CERT or VPN_CLIENT_KEY is missing."
-            exit 1
-          fi
-
           aws ec2 export-client-vpn-client-configuration \
             --client-vpn-endpoint-id "$ENDPOINT_ID" \
             --output text > client.ovpn
@@ -217,10 +104,10 @@ jobs:
             sleep 5
           done
 
-          if ! ip addr show tun0 >/dev/null 2>&1; then
+          ip addr show tun0 || {
             cat /tmp/openvpn.log
             exit 1
-          fi
+          }
 
       - name: Configure Kubernetes through SSM
         run: |
@@ -232,8 +119,7 @@ jobs:
             --query "Reservations[0].Instances[0].[InstanceId,PrivateIpAddress]" \
             --output text)
 
-          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ] ||
-             [ -z "$IP" ] || [ "$IP" = "None" ]; then
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
             echo "No running k3s instance found."
             exit 1
           fi
@@ -291,6 +177,7 @@ jobs:
             --query "Reservations[0].Instances[0].InstanceId" \
             --output text)
 
+          # Escaping single quotes safely for SSM execution
           ENCODED_ACME=$(echo "$ACME_JSON" | base64 -w 0)
 
           aws ssm send-command \
@@ -308,17 +195,52 @@ jobs:
         run: |
           set -euo pipefail
 
+          helm repo add nextcloud https://nextcloud.github.io/helm
           helm repo add sealed-secrets https://bitnami.github.io/sealed-secrets
           helm repo update
 
-          helm upgrade --install sealed-secrets-controller \
-            sealed-secrets/sealed-secrets \
-            --namespace default \
-            --version 2.19.3 \
-            --set fullnameOverride=sealed-secrets-controller \
-            --set crd.keep=true \
-            --wait \
-            --timeout=180s
+          helm dependency build ./infra/Kubernetes/helm-charts
+
+          echo "=== Chart package sizes ==="
+          du -sh infra/Kubernetes/helm-charts/charts/*
+
+          echo "=== Rendered manifest size ==="
+          helm template nextcloud ./infra/Kubernetes/helm-charts \
+            -f ./infra/Kubernetes/helm-charts/values.yaml \
+            --set nextcloud.externalDatabase.host="${{ inputs.rds_endpoint }}" \
+            > /tmp/nextcloud-rendered.yaml
+
+          wc -c /tmp/nextcloud-rendered.yaml
+
+          echo "=== Installing umbrella chart ==="
+          if helm upgrade --install nextcloud ./infra/Kubernetes/helm-charts \
+            -f ./infra/Kubernetes/helm-charts/values.yaml \
+            --set nextcloud.externalDatabase.host="${{ inputs.rds_endpoint }}"; then
+            echo "Helm installation command succeeded."
+          else
+            echo "ERROR: Helm installation failed. Collecting diagnostics..."
+
+            echo "=== Helm releases ==="
+            helm list --all-namespaces || true
+
+            echo "=== Helm release history ==="
+            helm history nextcloud -n default || true
+
+            echo "=== Helm release Secret metadata ==="
+            kubectl get secrets -n default \
+              -l owner=helm,name=nextcloud \
+              -o custom-columns='NAME:.metadata.name,STATUS:.metadata.labels.status,VERSION:.metadata.labels.version' \
+              || true
+
+            echo "=== Recent Kubernetes events ==="
+            kubectl get events -A \
+              --sort-by='.metadata.creationTimestamp' | tail -n 80 || true
+
+            echo "=== Recent pod status ==="
+            kubectl get pods -A -o wide || true
+
+            exit 1
+          fi
 
       - name: Create database SealedSecret
         env:
@@ -336,17 +258,18 @@ jobs:
             -n default --timeout=180s
 
           kubectl create secret generic db-secrets \
-            --namespace platform-nextcloud \
+            --namespace default \
             --from-literal=DB_USERNAME="$DB_USERNAME" \
             --from-literal=DB_PASSWORD="$DB_PASSWORD" \
             --dry-run=client -o yaml \
             | kubeseal --controller-namespace default --format yaml \
             | kubectl apply -f -
 
+          # Wait for Sealed Secrets to create the ordinary Kubernetes Secret.
           for i in $(seq 1 30); do
-            if kubectl get secret db-secrets -n platform-nextcloud \
+            if kubectl get secret db-secrets -n default \
                 -o jsonpath='{.data.DB_USERNAME}' 2>/dev/null | grep -q . \
-              && kubectl get secret db-secrets -n platform-nextcloud \
+              && kubectl get secret db-secrets -n default \
                 -o jsonpath='{.data.DB_PASSWORD}' 2>/dev/null | grep -q .; then
               echo "Database Secret is available."
               exit 0
@@ -355,22 +278,16 @@ jobs:
           done
 
           echo "db-secrets was not created correctly by the Sealed Secrets controller."
-          kubectl get sealedsecrets -n platform-nextcloud
+          kubectl get sealedsecrets -n default
           exit 1
 
       - name: Deploy and install Nextcloud
         env:
-          RDS_ENDPOINT: ${{ steps.rds.outputs.endpoint }}
+          RDS_ENDPOINT: ${{ inputs.rds_endpoint }}
           ADMIN_USER: ${{ secrets.ADMIN_USER }}
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-          HELM_DRIVER: configmap
         run: |
           set -euo pipefail
-
-          if [ -z "$RDS_ENDPOINT" ] || [ "$RDS_ENDPOINT" = "None" ]; then
-            echo "RDS_ENDPOINT is empty. Check the Get RDS endpoint step."
-            exit 1
-          fi
 
           if [ -z "$ADMIN_USER" ] || [ -z "$ADMIN_PASSWORD" ]; then
             echo "ADMIN_USER or ADMIN_PASSWORD GitHub secret is empty."
@@ -378,29 +295,23 @@ jobs:
           fi
 
           helm upgrade --install nextcloud ./infra/Kubernetes/helm-charts \
-            --namespace platform-nextcloud \
-            --create-namespace \
-            --history-max 3 \
             -f ./infra/Kubernetes/helm-charts/values.yaml \
             --set nextcloud.externalDatabase.host="$RDS_ENDPOINT" \
             --set-string nextcloud.nextcloud.username="$ADMIN_USER" \
             --set-string nextcloud.nextcloud.password="$ADMIN_PASSWORD"
 
           echo "Waiting for Nextcloud deployment..."
-          kubectl rollout status deployment/nextcloud \
-            -n platform-nextcloud --timeout=300s
+          kubectl rollout status deployment/nextcloud --timeout=300s
 
       - name: Restart Nextcloud and install
         run: |
           set -euo pipefail
 
-          kubectl rollout restart deployment/nextcloud \
-            -n platform-nextcloud
-          kubectl rollout status deployment/nextcloud \
-            -n platform-nextcloud --timeout=180s
+          kubectl rollout restart deployment/nextcloud
+          kubectl rollout status deployment/nextcloud --timeout=180s
 
           echo "Checking current installation status..."
-          if ! STATUS=$(kubectl exec -n platform-nextcloud deployment/nextcloud -- php occ status 2>&1); then
+          if ! STATUS=$(kubectl exec deployment/nextcloud -- php occ status 2>&1); then
             echo "$STATUS"
             echo "Unable to check Nextcloud installation status."
             exit 1
@@ -413,7 +324,7 @@ jobs:
 
           echo "Installing Nextcloud..."
 
-          kubectl exec -n platform-nextcloud deployment/nextcloud -- sh -c '
+          kubectl exec deployment/nextcloud -- sh -c '
             php occ maintenance:install \
               --database=pgsql \
               --database-host="$POSTGRES_HOST" \
@@ -425,12 +336,11 @@ jobs:
           '
 
           echo "Verifying installation..."
-          kubectl exec -n platform-nextcloud deployment/nextcloud -- php occ status
+          kubectl exec deployment/nextcloud -- php occ status
 
       - name: Verify Nextcloud pod readiness
         run: |
           set -euo pipefail
           kubectl wait --for=condition=Ready pod \
-            -n platform-nextcloud \
             -l app.kubernetes.io/instance=nextcloud \
             --timeout=180s

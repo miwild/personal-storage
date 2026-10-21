@@ -11,3 +11,6 @@ dependencies:
     # This must be the metadata URL, NOT the web repo address
     repository: "https://nextcloud.github.io/helm"
 
+  - name: sealed-secrets
+    version: 2.19.3
+    repository: "https://bitnami.github.io/sealed-secrets"
