@@ -195,6 +195,23 @@ jobs:
           terraform init -input=false
           terraform destroy -auto-approve -input=false
 
+      - name: Mark infrastructure as stopped
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DEMO_STATUS_KV_NAMESPACE_ID: ${{ secrets.DEMO_STATUS_KV_NAMESPACE_ID }}
+        run: |
+          set -euo pipefail
+
+          RESPONSE=$(curl --silent --show-error --fail-with-body \
+            --request PUT \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            --header "Content-Type: application/octet-stream" \
+            --data-binary "stopped" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces/${DEMO_STATUS_KV_NAMESPACE_ID}/values/infrastructureStatus")
+
+          echo "$RESPONSE" | jq -e '.success == true' >/dev/null
+
       - name: Clear cleanup status
         if: always()
         continue-on-error: true
@@ -291,6 +308,23 @@ jobs:
           cd infra/AWS/ACM
           terraform init -input=false
           terraform destroy -auto-approve -input=false
+
+      - name: Mark infrastructure as stopped
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DEMO_STATUS_KV_NAMESPACE_ID: ${{ secrets.DEMO_STATUS_KV_NAMESPACE_ID }}
+        run: |
+          set -euo pipefail
+
+          RESPONSE=$(curl --silent --show-error --fail-with-body \
+            --request PUT \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            --header "Content-Type: application/octet-stream" \
+            --data-binary "stopped" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces/${DEMO_STATUS_KV_NAMESPACE_ID}/values/infrastructureStatus")
+
+          echo "$RESPONSE" | jq -e '.success == true' >/dev/null
 
       - name: Clear cleanup status
         if: always()
